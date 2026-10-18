@@ -1,0 +1,29 @@
+pre-commit:
+  parallel: false
+  commands:
+    gofmt:
+      glob: "*.go"
+      run: test -z "$(gofmt -l {staged_files})" || { gofmt -l {staged_files}; exit 1; }
+    lint:
+      glob: "*.go"
+      run: golangci-lint run --new-from-rev=HEAD ./...
+    unit:
+      glob: "*.go"
+      run: go test -race -shuffle=on -count=1 ./...
+    gitleaks:
+      run: gitleaks protect --staged --redact
+    skips:
+      run: scripts/check-skips.sh
+    gen-fresh:
+      glob: "{api/openapi.yaml,db/**/*.sql,sqlc.yaml}"
+      run: make gen-check
+commit-msg:
+  commands:
+    conventional:
+      run: scripts/check-commit-msg.sh {1}
+pre-push:
+  commands:
+    unit:
+      run: make test
+    integration:
+      run: make test-int

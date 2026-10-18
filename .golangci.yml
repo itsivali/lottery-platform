@@ -1,0 +1,24 @@
+version: "2"
+run:
+  build-tags: [integration]
+linters:
+  default: standard
+  enable:
+    - staticcheck
+    - gosec
+    - errorlint
+    - forbidigo
+    - bodyclose
+    - noctx
+  settings:
+    forbidigo:
+      forbid:
+        - pattern: '^fmt\.Sprintf$'
+          msg: "Never build SQL with fmt.Sprintf; use sqlc queries. If this is not SQL, use string concatenation or strconv."
+          exclude-godoc-examples: true
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters: [gosec, forbidigo]
+formatters:
+  enable: [gofmt, goimports]

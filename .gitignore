@@ -1,0 +1,38 @@
+# Go
+/bin/
+*.test
+*.out
+coverage.*
+vendor/
+# Node
+node_modules/
+dist/
+.vite/
+playwright-report/
+test-results/
+# Flutter
+.dart_tool/
+.flutter-plugins*
+.packages
+build/
+*.iml
+# IDEs
+.idea/
+.vscode/
+*.swp
+.DS_Store
+# Secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.jks
+# Terraform
+*.tfstate
+*.tfstate.*
+.terraform/
+# Local
+.claude/
+tmp/

@@ -1,0 +1,39 @@
+openapi: 3.1.0
+info:
+  title: Lottery Platform API
+  version: 0.0.1
+  description: Public API contract (source of truth). Phase 0 skeleton; the /v1 surface arrives in later phases.
+servers:
+  - url: http://localhost:8080
+tags:
+  - name: ops
+paths:
+  /healthz:
+    get:
+      operationId: healthz
+      tags: [ops]
+      summary: Liveness probe
+      security: []
+      responses:
+        "200":
+          description: Process is alive
+          content:
+            text/plain:
+              schema: { type: string }
+  /readyz:
+    get:
+      operationId: readyz
+      tags: [ops]
+      summary: Readiness probe (checks Postgres)
+      security: []
+      responses:
+        "200":
+          description: Ready
+          content:
+            text/plain:
+              schema: { type: string }
+        "503":
+          description: Dependency unavailable
+          content:
+            text/plain:
+              schema: { type: string }
