@@ -1,6 +1,6 @@
 # Phase 0 — Bootstrap: checkpoint
 
-Status: IN PROGRESS
+Status: BLOCKED — branch protection needs a paid plan or a public repo (see Results)
 
 ## Plan (written before coding)
 
@@ -19,5 +19,12 @@ Order of work:
 Modules/files touched: `internal/platform/{config,db,clock,httpx}`, `cmd/{api,worker,lotteryctl}`, `mocks/*`, `db/migrations`, `api/openapi.yaml`.
 Migrations: `00001_init.sql` (extensions only; real schema is Phase 1).
 
-## Results
-(filled in at the end of the phase)
+## Results (so far)
+
+- Walking skeleton built test-first; `make ci` green locally (lint, unit, integration with testcontainers, coverage 94.6% vs 70% gate).
+- `docker compose up --build --wait` brings up Postgres, Valkey, Keycloak, Daraja/KYC/SMS/drand mocks, migrate, api; `/readyz` returns 503 with Postgres stopped and 200 after restart.
+- Green CI run on main (ci-ok): https://github.com/itsivali/lottery-platform/actions/runs/39155808054
+- images workflow (Trivy, Syft SBOM, cosign keyless, ghcr push): https://github.com/itsivali/lottery-platform/actions/runs/39155808159
+- Squash-only merges and delete-branch-on-merge enabled.
+- Blocked: `PUT branches/main/protection` returned 403 "Upgrade to GitHub Pro or make this repository public". Awaiting the visibility decision.
+- Deviations: the first CI run was red (golangci config key, Trivy action version, path filter); fixed forward on main before protection existed.
