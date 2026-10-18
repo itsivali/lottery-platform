@@ -27,7 +27,8 @@ jobs:
         run: |
           if [ -z "$BASE" ] || ! git cat-file -e "$BASE" 2>/dev/null; then files=$(git ls-files); else files=$(git diff --name-only "$BASE" HEAD); fi
           for app in web backoffice mobile; do
-            if echo "$files" | grep -qE "^apps/$app/|^api/openapi.yaml"; then echo "$app=true" >> "$GITHUB_OUTPUT"; else echo "$app=false" >> "$GITHUB_OUTPUT"; fi
+            manifest=apps/$app/package.json; [ "$app" = mobile ] && manifest=apps/mobile/pubspec.yaml
+            if [ -f "$manifest" ] && echo "$files" | grep -qE "^apps/$app/|^api/openapi.yaml"; then echo "$app=true" >> "$GITHUB_OUTPUT"; else echo "$app=false" >> "$GITHUB_OUTPUT"; fi
           done
 
   go-lint:
@@ -168,7 +169,7 @@ jobs:
         with: { go-version-file: go.mod }
       - run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
       - run: go run github.com/google/osv-scanner/v2/cmd/osv-scanner@v2.7.0 scan source -r --lockfile go.mod .
-      - uses: aquasecurity/trivy-action@76071ef0d7ec797419534a183b498b4d6366cf37 # v0.31.0
+      - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: fs
           severity: CRITICAL,HIGH

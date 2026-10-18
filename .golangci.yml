@@ -15,7 +15,6 @@ linters:
       forbid:
         - pattern: '^fmt\.Sprintf$'
           msg: "Never build SQL with fmt.Sprintf; use sqlc queries. If this is not SQL, use string concatenation or strconv."
-          exclude-godoc-examples: true
   exclusions:
     rules:
       - path: _test\.go
