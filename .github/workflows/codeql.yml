@@ -11,7 +11,19 @@ concurrency:
   group: codeql-${{ github.ref }}
   cancel-in-progress: true
 jobs:
+  detect:
+    runs-on: ubuntu-24.04
+    outputs:
+      languages: ${{ steps.d.outputs.languages }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - id: d
+        run: |
+          langs='["go"]'
+          if ls apps/*/package.json >/dev/null 2>&1; then langs='["go","javascript-typescript"]'; fi
+          echo "languages=$langs" >> "$GITHUB_OUTPUT"
   analyze:
+    needs: detect
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -20,7 +32,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        language: [go, javascript-typescript]
+        language: ${{ fromJSON(needs.detect.outputs.languages) }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
