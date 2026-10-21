@@ -331,3 +331,19 @@ func TestPostingRules_RejectOutOfRangeAmountsAndUnknownRounding(t *testing.T) {
 		t.Error("oversized stake accepted")
 	}
 }
+
+func TestPostingRules_AcceptExactlyTheMaximumAmountAndNothingAbove(t *testing.T) {
+	none := rate(t, "0", ledger.HalfUp)
+	if _, err := ledger.Stake(ref, user, ledger.MaxAmountKES); err != nil {
+		t.Errorf("Stake(max) refused: %v", err)
+	}
+	if _, err := ledger.Withdrawal(ref, user, ledger.MaxAmountKES, none); err != nil {
+		t.Errorf("Withdrawal(max) refused: %v", err)
+	}
+	if _, err := ledger.Stake(ref, user, ledger.MaxAmountKES+1); err == nil {
+		t.Error("Stake(max+1) accepted")
+	}
+	if got, err := ledger.Apply(ledger.MaxAmountKES, ledger.RateFromE5(100000), ledger.HalfUp); err != nil || got != ledger.MaxAmountKES {
+		t.Errorf("Apply(max, 100%%) = %d, %v", got, err)
+	}
+}
