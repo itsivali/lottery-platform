@@ -7,4 +7,4 @@
 - [ ] `make ci` passes locally
 - [ ] Money paths use whole-KES `bigint`; no floats
 - [ ] No secrets or real credentials
-- [ ] Docs / ADR / OPEN_DECISIONS updated if a decision or placeholder was touched
+- [ ] Docs / ADR / open-decisions register updated if a decision or placeholder was touched

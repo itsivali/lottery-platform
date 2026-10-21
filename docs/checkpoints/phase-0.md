@@ -5,7 +5,7 @@ Status: COMPLETE — awaiting human go-ahead
 ## Plan (written before coding)
 
 Order of work:
-1. Docs: BUILD_PROMPT.md, PROJECT_DESCRIPTION.pdf, OPEN_DECISIONS.md, ADR template + ADR 0001/0002, ci-secrets.md.
+1. Docs: build brief, project description and open-decisions register (kept outside the repository), ADR template + ADR 0001/0002, ci-secrets.md.
 2. Tooling: `mise.toml` pins; `mise install`.
 3. Repo hygiene: README, CONTRIBUTING, SECURITY, CODEOWNERS, editorconfig, gitignore, gitattributes, PR/issue templates, licence notice, dependabot.
 4. Layout from brief section 4; `go.mod`; OpenAPI skeleton; goose init migration.
@@ -45,4 +45,4 @@ Deviations and notes:
 
 Deferred: web/back-office/Flutter CI jobs are path-filtered no-ops until Phase 6/7; preview-e2e, deploy-prod and cosign verification at deploy are untested until the secrets in `docs/ci-secrets.md` exist; real Daraja/KYC/SMS/drand mocks arrive in Phases 2-4; nightly mutation/10M-spin jobs have no targets yet.
 
-DECISION items touched: licence (All rights reserved); all others only listed in OPEN_DECISIONS.md.
+DECISION items touched: licence (All rights reserved); all others only listed in the open-decisions register.

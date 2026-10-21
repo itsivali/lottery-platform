@@ -31,6 +31,6 @@ address. If that address is wrong, every player shares one limit (too coarse) or
 2. **Not over-aggregated.** From a second network (for example a phone on mobile data) repeat 5 attempts. Expected `401`s,
    not `429`s. If you get `429` straight away, all clients share one address: the rightmost entry is a proxy. Check the
    chain (temporarily log `X-Forwarded-For`) and set `TRUSTED_PROXY_HOPS` to the position of the real client.
-3. Record the observed chain and the chosen HOPS in `docs/OPEN_DECISIONS.md` (item 26).
+3. Record the observed chain and the chosen HOPS in the open-decisions register (item 26).
 
 The same behaviour is covered locally by `TestApp_PerClientLimitsUseTheTrustedProxyEntryNotWhatTheClientClaims`.

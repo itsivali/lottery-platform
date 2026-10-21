@@ -9,7 +9,7 @@ CREATE TABLE game.odds_config (
   CONSTRAINT odds_config_lucky_lt_slots CHECK (lucky_slots < slot_count),
   CONSTRAINT odds_config_effective_from_key UNIQUE (effective_from)
 );
--- PLACEHOLDER defaults (docs/OPEN_DECISIONS.md #6): 12 slots, 1 lucky. Effective from the epoch so they always apply.
+-- PLACEHOLDER defaults (open-decisions register #6): 12 slots, 1 lucky. Effective from the epoch so they always apply.
 INSERT INTO game.odds_config (slot_count, lucky_slots, effective_from, created_by) VALUES (12, 1, '2000-01-01', 'migration:placeholder');
 
 CREATE TABLE game.chance_tiers (
@@ -21,7 +21,7 @@ CREATE TABLE game.chance_tiers (
   created_at      timestamptz NOT NULL DEFAULT now(),
   CONSTRAINT chance_tiers_from_plays_key UNIQUE (effective_from, plays)
 );
--- PLACEHOLDER defaults (OPEN_DECISIONS.md #9): 1->1, 2->2, 3->3, 4->5.
+-- PLACEHOLDER defaults (open-decisions register #9): 1->1, 2->2, 3->3, 4->5.
 INSERT INTO game.chance_tiers (effective_from, plays, chances, created_by) VALUES
   ('2000-01-01',1,1,'migration:placeholder'), ('2000-01-01',2,2,'migration:placeholder'),
   ('2000-01-01',3,3,'migration:placeholder'), ('2000-01-01',4,5,'migration:placeholder');

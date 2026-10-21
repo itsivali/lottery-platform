@@ -18,5 +18,5 @@
 ## Rules
 - Money is whole KES `bigint` (ADR 0001). No floats in the money path.
 - No secrets in the repo. No real Daraja production credentials anywhere.
-- Non-obvious technical choices get an ADR in `docs/adr/`. Placeholders for business values go in `docs/OPEN_DECISIONS.md`.
+- Non-obvious technical choices get an ADR in `docs/adr/`. Placeholders for business values go in the open-decisions register (kept outside this repository).
 - Stub security closed (refuse), never open.

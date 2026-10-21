@@ -36,3 +36,8 @@ build/
 # Local
 .claude/
 tmp/
+
+# Private project documents: kept on disk for the team, never committed.
+docs/BUILD_PROMPT.md
+docs/OPEN_DECISIONS.md
+docs/PROJECT_DESCRIPTION.pdf
