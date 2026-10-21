@@ -2,11 +2,17 @@ openapi: 3.1.0
 info:
   title: Lottery Platform API
   version: 0.0.1
-  description: Public API contract (source of truth). Phase 0 skeleton; the /v1 surface arrives in later phases.
+  description: |
+    Public API contract (source of truth). Errors are RFC 7807 problem+json. Every POST, PUT, PATCH and DELETE requires an
+    `Idempotency-Key` header; replays return the stored response with `Idempotent-Replay: true`, and reusing a key with a
+    different request returns 422.
 servers:
   - url: http://localhost:8080
 tags:
   - name: ops
+  - name: auth
+  - name: kyc
+  - name: responsible-gaming
 paths:
   /healthz:
     get:
@@ -37,3 +43,342 @@ paths:
           content:
             text/plain:
               schema: { type: string }
+  /v1/auth/otp/request:
+    post:
+      operationId: requestOtp
+      tags: [auth]
+      summary: Send a sign-in code by SMS
+      description: Always answers 204 for a well-formed number, whether or not an account exists.
+      security: []
+      parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/OtpRequest" }
+      responses:
+        "204": { description: Code sent }
+        "400": { $ref: "#/components/responses/Problem" }
+        "429": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+  /v1/auth/otp/verify:
+    post:
+      operationId: verifyOtp
+      tags: [auth]
+      summary: Exchange a code for tokens (creates the account on first use)
+      security: []
+      parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/OtpVerify" }
+      responses:
+        "200":
+          description: Signed in
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Tokens" }
+        "400": { $ref: "#/components/responses/Problem" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "429": { $ref: "#/components/responses/Problem" }
+  /v1/auth/refresh:
+    post:
+      operationId: refreshTokens
+      tags: [auth]
+      summary: Rotate a refresh token
+      description: Presenting an already-used refresh token revokes the whole session.
+      security: []
+      parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/Refresh" }
+      responses:
+        "200":
+          description: New tokens
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Tokens" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "429": { $ref: "#/components/responses/Problem" }
+  /v1/auth/logout:
+    post:
+      operationId: logout
+      tags: [auth]
+      summary: End the current session
+      parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
+      responses:
+        "204": { description: Signed out }
+        "401": { $ref: "#/components/responses/Problem" }
+  /v1/auth/sso/{provider}:
+    post:
+      operationId: signInSso
+      tags: [auth]
+      summary: Sign in with a linked Google or Apple identity
+      description: An unlinked identity gets 409; it must sign in by phone, pass KYC and then link.
+      security: []
+      parameters:
+        - { $ref: "#/components/parameters/IdempotencyKey" }
+        - { $ref: "#/components/parameters/Provider" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SsoSignIn" }
+      responses:
+        "200":
+          description: Signed in
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Tokens" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+  /v1/auth/sso/{provider}/link:
+    post:
+      operationId: linkSso
+      tags: [auth]
+      summary: Link a Google or Apple identity to the verified account
+      parameters:
+        - { $ref: "#/components/parameters/IdempotencyKey" }
+        - { $ref: "#/components/parameters/Provider" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SsoLink" }
+      responses:
+        "204": { description: Linked }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+  /v1/kyc:
+    get:
+      operationId: getKyc
+      tags: [kyc]
+      summary: Verification status of the signed-in player
+      responses:
+        "200":
+          description: Status
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/KycStatus" }
+        "401": { $ref: "#/components/responses/Problem" }
+    post:
+      operationId: submitKyc
+      tags: [kyc]
+      summary: Submit national ID details for verification
+      parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/KycSubmission" }
+      responses:
+        "200":
+          description: Verification outcome (`verified` or `manual_review`)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/KycStatus" }
+        "400": { $ref: "#/components/responses/Problem" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+  /v1/rg/limits:
+    get:
+      operationId: getLimits
+      tags: [responsible-gaming]
+      summary: Deposit limits in force and pending increases
+      responses:
+        "200":
+          description: Limits
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Limits" }
+        "401": { $ref: "#/components/responses/Problem" }
+    put:
+      operationId: setLimit
+      tags: [responsible-gaming]
+      summary: Set a deposit limit (decreases apply now, increases after the cooling-off)
+      parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SetLimit" }
+      responses:
+        "200":
+          description: The new limit version
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Limit" }
+        "400": { $ref: "#/components/responses/Problem" }
+        "401": { $ref: "#/components/responses/Problem" }
+  /v1/rg/timeout:
+    post:
+      operationId: startTimeout
+      tags: [responsible-gaming]
+      summary: Take a time-out (24h, 7d or 30d)
+      parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/Timeout" }
+      responses:
+        "204": { description: Time-out started }
+        "400": { $ref: "#/components/responses/Problem" }
+        "401": { $ref: "#/components/responses/Problem" }
+  /v1/rg/self-exclusion:
+    post:
+      operationId: selfExclude
+      tags: [responsible-gaming]
+      summary: Self-exclude for 6 months, 1 year or permanently (cannot be shortened)
+      parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SelfExclusion" }
+      responses:
+        "204": { description: Self-exclusion started }
+        "400": { $ref: "#/components/responses/Problem" }
+        "401": { $ref: "#/components/responses/Problem" }
+components:
+  securitySchemes:
+    bearer:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: 1-255 URL-safe characters, unique per logical request.
+      schema: { type: string, minLength: 1, maxLength: 255, pattern: "^[A-Za-z0-9._:~=+/-]+$" }
+    Provider:
+      name: provider
+      in: path
+      required: true
+      schema: { type: string, enum: [google, apple] }
+  responses:
+    Problem:
+      description: RFC 7807 problem details
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+  schemas:
+    Problem:
+      type: object
+      required: [type, title, status]
+      properties:
+        type: { type: string, format: uri }
+        title: { type: string }
+        status: { type: integer }
+        detail: { type: string }
+    Device:
+      type: object
+      additionalProperties: false
+      required: [platform]
+      properties:
+        fingerprint: { type: string, description: Required on android and ios. }
+        platform: { type: string, enum: [android, ios, web] }
+    OtpRequest:
+      type: object
+      additionalProperties: false
+      required: [msisdn]
+      properties:
+        msisdn: { type: string, example: "0712345678" }
+    OtpVerify:
+      type: object
+      additionalProperties: false
+      required: [msisdn, code, device]
+      properties:
+        msisdn: { type: string }
+        code: { type: string, pattern: "^[0-9]{6}$" }
+        device: { $ref: "#/components/schemas/Device" }
+    Refresh:
+      type: object
+      additionalProperties: false
+      required: [refresh_token]
+      properties:
+        refresh_token: { type: string }
+        device_fingerprint: { type: string }
+    SsoSignIn:
+      type: object
+      additionalProperties: false
+      required: [id_token, nonce]
+      properties:
+        id_token: { type: string }
+        nonce: { type: string }
+        device: { $ref: "#/components/schemas/Device" }
+    SsoLink:
+      type: object
+      additionalProperties: false
+      required: [id_token, nonce]
+      properties:
+        id_token: { type: string }
+        nonce: { type: string }
+    Tokens:
+      type: object
+      required: [access_token, refresh_token, expires_at]
+      properties:
+        access_token: { type: string }
+        refresh_token: { type: string }
+        expires_at: { type: string, format: date-time }
+    KycSubmission:
+      type: object
+      additionalProperties: false
+      required: [national_id, full_name, date_of_birth]
+      properties:
+        national_id: { type: string, pattern: "^[0-9]{7,9}$" }
+        full_name: { type: string, minLength: 2, maxLength: 100 }
+        date_of_birth: { type: string, format: date }
+    KycStatus:
+      type: object
+      required: [status]
+      properties:
+        status: { type: string, enum: [none, pending, verified, manual_review, rejected] }
+    Limit:
+      type: object
+      required: [amount_kes, effective_from]
+      properties:
+        amount_kes: { type: integer, format: int64, minimum: 1 }
+        effective_from: { type: string, format: date-time }
+    Limits:
+      type: object
+      required: [limits]
+      properties:
+        limits:
+          type: object
+          additionalProperties:
+            type: object
+            properties:
+              current: { oneOf: [{ $ref: "#/components/schemas/Limit" }, { type: "null" }] }
+              pending: { oneOf: [{ $ref: "#/components/schemas/Limit" }, { type: "null" }] }
+    SetLimit:
+      type: object
+      additionalProperties: false
+      required: [period, amount_kes]
+      properties:
+        period: { type: string, enum: [daily, weekly, monthly] }
+        amount_kes: { type: integer, format: int64, minimum: 1 }
+    Timeout:
+      type: object
+      additionalProperties: false
+      required: [duration]
+      properties:
+        duration: { type: string, enum: ["24h", "7d", "30d"] }
+    SelfExclusion:
+      type: object
+      additionalProperties: false
+      required: [term]
+      properties:
+        term: { type: string, enum: ["6m", "1y", permanent] }
+security:
+  - bearer: []

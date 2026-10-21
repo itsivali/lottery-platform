@@ -17,7 +17,10 @@ type Pinger interface {
 const readyTimeout = 2 * time.Second
 
 // NewRouter builds the root router with liveness and readiness probes.
-func NewRouter(db Pinger) http.Handler {
+func NewRouter(db Pinger) http.Handler { return NewRouterWith(db, nil) }
+
+// NewRouterWith is NewRouter plus a hook that mounts additional routes (the /v1 API).
+func NewRouterWith(db Pinger, mount func(chi.Router)) http.Handler {
 	r := chi.NewRouter()
 	r.Use(securityHeaders)
 	r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) {
@@ -34,6 +37,9 @@ func NewRouter(db Pinger) http.Handler {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ready"))
 	})
+	if mount != nil {
+		mount(r)
+	}
 	return r
 }
 

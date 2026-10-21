@@ -30,3 +30,10 @@ func WriteProblemRetry(w http.ResponseWriter, status int, slug, title, detail st
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(problem{Type: problemTypeBase + slug, Title: title, Status: status, Detail: detail})
 }
+
+// WriteJSON writes v as a JSON response with the given status.
+func WriteJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(v)
+}
