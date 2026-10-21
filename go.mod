@@ -8,6 +8,8 @@ require (
 	github.com/pressly/goose/v3 v3.29.0
 	github.com/testcontainers/testcontainers-go v0.44.0
 	github.com/testcontainers/testcontainers-go/modules/postgres v0.44.0
+	github.com/valkey-io/valkey-go v1.0.79
+	pgregory.net/rapid v1.2.0
 )
 
 require (
@@ -68,5 +70,4 @@ require (
 	golang.org/x/sync v0.24.0 // indirect
 	golang.org/x/sys v0.49.0 // indirect
 	golang.org/x/text v0.43.0 // indirect
-	pgregory.net/rapid v1.2.0 // indirect
 )

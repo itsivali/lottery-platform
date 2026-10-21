@@ -21,3 +21,21 @@ sql:
         out: internal/wallet/store
         sql_package: pgx/v5
         overrides: *overrides
+  - engine: postgresql
+    schema: db/migrations
+    queries: db/queries/idempotency.sql
+    gen:
+      go:
+        package: store
+        out: internal/platform/idempotency/store
+        sql_package: pgx/v5
+        overrides: *overrides
+  - engine: postgresql
+    schema: db/migrations
+    queries: db/queries/audit.sql
+    gen:
+      go:
+        package: store
+        out: internal/audit/store
+        sql_package: pgx/v5
+        overrides: *overrides

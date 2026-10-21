@@ -300,14 +300,16 @@ type PayoutsPayout struct {
 }
 
 type PlatformIdempotencyKey struct {
-	Principal      string
-	Key            string
-	RequestHash    []byte
-	ResponseStatus pgtype.Int2
-	ResponseBody   []byte
-	CreatedAt      pgtype.Timestamptz
-	CompletedAt    pgtype.Timestamptz
-	ExpiresAt      pgtype.Timestamptz
+	Principal           string
+	Key                 string
+	RequestHash         []byte
+	ResponseStatus      pgtype.Int2
+	ResponseBody        []byte
+	CreatedAt           pgtype.Timestamptz
+	CompletedAt         pgtype.Timestamptz
+	ExpiresAt           pgtype.Timestamptz
+	ResponseContentType *string
+	ResponseLocation    *string
 }
 
 type RgLimit struct {

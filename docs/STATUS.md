@@ -3,8 +3,8 @@
 Read this first at the start of every session.
 
 - **Phase:** 1 — Foundations (in progress)
-- **Last completed step:** Phase 0 accepted (see `docs/checkpoints/phase-0.md`); Render deploy fix merged (#11).
-- **Next step:** Slice 1 — schema, roles/grants, ledger + wallet DB invariants, clock (branch `feat/phase1-schema`).
+- **Last completed step:** Slice 1 (schema, merged #12); slice 2 ledger+wallet (PR #13); slice 3 idempotency, rate limit, audit (branch `feat/phase1-idempotency-ratelimit-audit`).
+- **Next step:** Slice 4 — identity (OTP, sessions, refresh rotation, SSO linking), KYC mock adapter, RG limits, auth/IDOR tests.
 - **Open questions:** none blocking.
 
 Slices for Phase 1 (each is its own PR, squash-merged on green CI):
