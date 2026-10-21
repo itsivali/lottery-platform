@@ -158,3 +158,43 @@ func TestOIDC_CachesKeysAndRefetchesOnRotation(t *testing.T) {
 }
 
 func (f *oidcFixture) now() time.Time { n, _ := f.clk.Now(context.Background(), nil); return n }
+
+func TestOIDC_CacheBoundariesAreExact(t *testing.T) {
+	ctx := context.Background()
+	tokenFor := func(f *oidcFixture, kid string) string { return f.token(t, kid, jwt.SigningMethodRS256, f.claims(nil)) }
+
+	// an unknown key id may trigger a refetch only once a full minute has passed since the last fetch
+	f := newOIDC(t)
+	if _, err := f.v.VerifyIDToken(ctx, "google", tokenFor(f, "k1"), "n1"); err != nil {
+		t.Fatal(err)
+	}
+	f.kid.Store("k2")
+	f.clk.Advance(59 * time.Second)
+	if _, err := f.v.VerifyIDToken(ctx, "google", tokenFor(f, "k2"), "n1"); err == nil {
+		t.Fatal("refetched after 59s: the throttle is too loose")
+	}
+	f.clk.Advance(time.Second) // exactly one minute since the fetch
+	if _, err := f.v.VerifyIDToken(ctx, "google", tokenFor(f, "k2"), "n1"); err != nil {
+		t.Fatalf("not refetched at exactly one minute: %v", err)
+	}
+
+	// cached keys expire at exactly six hours, even for a key id we know
+	g := newOIDC(t)
+	if _, err := g.v.VerifyIDToken(ctx, "google", tokenFor(g, "k1"), "n1"); err != nil {
+		t.Fatal(err)
+	}
+	g.clk.Advance(6*time.Hour - time.Second)
+	if _, err := g.v.VerifyIDToken(ctx, "google", g.token(t, "k1", jwt.SigningMethodRS256, g.claims(jwt.MapClaims{"exp": g.now().Add(time.Hour).Unix()})), "n1"); err != nil {
+		t.Fatal(err)
+	}
+	if g.fetches.Load() != 1 {
+		t.Fatalf("%d fetches before the cache expired, want 1", g.fetches.Load())
+	}
+	g.clk.Advance(time.Second) // exactly six hours
+	if _, err := g.v.VerifyIDToken(ctx, "google", g.token(t, "k1", jwt.SigningMethodRS256, g.claims(jwt.MapClaims{"exp": g.now().Add(time.Hour).Unix()})), "n1"); err != nil {
+		t.Fatal(err)
+	}
+	if g.fetches.Load() != 2 {
+		t.Fatalf("%d fetches after exactly six hours, want 2 (cache must expire)", g.fetches.Load())
+	}
+}

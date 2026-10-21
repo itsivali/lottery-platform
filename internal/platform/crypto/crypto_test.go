@@ -140,3 +140,24 @@ func TestEqual_ConstantTimeComparison(t *testing.T) {
 		t.Fatal("Equal wrong")
 	}
 }
+
+func TestDecrypt_EveryTooShortBlobIsRefusedWithoutPanicking(t *testing.T) {
+	kr, _ := crypto.NewKeyring(1, map[byte][]byte{1: key(t)})
+	whole, _ := kr.Encrypt([]byte{}, nil) // the shortest valid value: header + tag only
+	for n := range len(whole) {
+		blob := whole[:n]
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Errorf("length %d panicked: %v", n, r)
+				}
+			}()
+			if _, err := kr.Decrypt(blob, nil); err == nil {
+				t.Errorf("a %d-byte prefix of a %d-byte value was accepted", n, len(whole))
+			}
+		}()
+	}
+	if _, err := kr.Decrypt(whole, nil); err != nil {
+		t.Fatalf("the full minimal value must decrypt: %v", err)
+	}
+}

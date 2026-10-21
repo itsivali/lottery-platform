@@ -138,5 +138,19 @@ Closed the items deferred above:
 - Fixed along the way: the OIDC verifier would have panicked on the first Google/Apple sign-in (database clock with no
   database); compose's Postgres healthcheck passed against the init-time server and made migrations flaky; `Wall` clock added.
 
-Still open: mutation testing (`gremlins` could not be installed here because the module proxy timed out; see
-`docs/runbooks` once run), real SMS / registry vendors, and the production verification of the two Render behaviours above.
+Mutation testing (`gremlins` v0.6.0, the version the nightly job pins, unit tests only, gate 75% efficacy):
+
+| Package | Killed | Survived | Efficacy | Notes |
+|---|---|---|---|---|
+| `internal/ledger` | 47 | 1 (fixed) | 97.9% before the fix | 13 mutants in `store.go` are not covered by unit tests |
+| `internal/platform/crypto` | 23 | 1 (fixed) | 100% after | a truncated-ciphertext length check |
+| `internal/identity` | 22 | 2 (fixed) | 100% after | JWKS cache boundaries |
+| `internal/rg` | 11 | 0 | 100% | only 22% of mutants are reachable from unit tests |
+
+The survivors were real gaps (the maximum-amount boundary, panic-free handling of short ciphertexts, the exact JWKS
+throttle and expiry) and each now has a test. **Not mutation-tested:** the code that only the integration tests reach
+(wallet, KYC and RG services, idempotency, rate limiting, the HTTP layer). Running gremlins with `-tags integration` starts
+a database container per mutant, which is hours of runtime; it belongs in the nightly job on a runner sized for it.
+
+Still open: real SMS and national-registry vendors, the real Play Integrity / App Attest verifiers, and the production
+verification of the two Render behaviours described above.
