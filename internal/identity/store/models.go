@@ -320,6 +320,7 @@ type RgLimit struct {
 	AmountKes     int64
 	EffectiveFrom time.Time
 	RequestedAt   time.Time
+	CancelledAt   *time.Time
 }
 
 type RgRestriction struct {

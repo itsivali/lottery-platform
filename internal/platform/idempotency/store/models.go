@@ -319,6 +319,7 @@ type RgLimit struct {
 	AmountKes     int64
 	EffectiveFrom pgtype.Timestamptz
 	RequestedAt   pgtype.Timestamptz
+	CancelledAt   pgtype.Timestamptz
 }
 
 type RgRestriction struct {

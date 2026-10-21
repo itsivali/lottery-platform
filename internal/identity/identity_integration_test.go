@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/itsivali/lottery-platform/internal/audit"
@@ -451,5 +452,37 @@ func TestSSO_SubjectCannotBeLinkedToTwoAccountsAndBadTokensAreRefused(t *testing
 	}
 	if _, err := e.svc.SignInSSO(ctx, "apple", "ok:sub-1", "wrong-nonce", phone); !errors.Is(err, identity.ErrTokenInvalid) {
 		t.Fatalf("wrong nonce err = %v", err)
+	}
+}
+
+func TestEligibility_OnlyActiveKYCVerifiedAccountsMayTransact(t *testing.T) {
+	e := setup(t)
+	ctx := context.Background()
+	tok := e.login(t, e.newMSISDN(), phone)
+	p, _ := e.svc.Authenticate(ctx, tok.Access)
+	check := func() error {
+		return pgx.BeginFunc(ctx, e.pool, func(tx pgx.Tx) error { return e.svc.AssertEligible(ctx, tx, p.UserID) })
+	}
+	for _, st := range []string{"none", "pending", "manual_review", "rejected"} {
+		if _, err := e.pool.Exec(ctx, `UPDATE identity.users SET kyc_status = $1 WHERE id = $2`, st, p.UserID); err != nil {
+			t.Fatal(err)
+		}
+		if err := check(); !errors.Is(err, identity.ErrKYCRequired) {
+			t.Errorf("kyc %s: err = %v, want ErrKYCRequired", st, err)
+		}
+	}
+	if _, err := e.pool.Exec(ctx, `UPDATE identity.users SET kyc_status='verified', national_id_hash='\x02' WHERE id = $1`, p.UserID); err != nil {
+		t.Fatal(err)
+	}
+	if err := check(); err != nil {
+		t.Fatalf("verified active account refused: %v", err)
+	}
+	for _, st := range []string{"suspended", "closed"} {
+		if _, err := e.pool.Exec(ctx, `UPDATE identity.users SET status = $1 WHERE id = $2`, st, p.UserID); err != nil {
+			t.Fatal(err)
+		}
+		if err := check(); !errors.Is(err, identity.ErrAccountSuspended) {
+			t.Errorf("status %s: err = %v", st, err)
+		}
 	}
 }
