@@ -1,5 +1,7 @@
-// Package identity owns players' phone identity: OTP sign-in, access and refresh tokens, sessions, devices and SSO
-// linking. National-ID verification lives in kyc; the ID, not the phone, is the identity of record.
+// Package identity owns player accounts: sign-up and login with a phone number and password, access and refresh tokens,
+// sessions, devices and SSO linking. There is no SMS code: ownership of the phone number is proved once, by an M-Pesa STK
+// Push confirmation during the first top-up (the payments module calls MarkPhoneVerified). National-ID verification
+// lives in kyc; the ID, not the phone, is the identity of record.
 package identity
 
 import (
@@ -14,40 +16,28 @@ import (
 	"github.com/itsivali/lottery-platform/internal/audit"
 	"github.com/itsivali/lottery-platform/internal/identity/store"
 	"github.com/itsivali/lottery-platform/internal/platform/clock"
+	"github.com/itsivali/lottery-platform/internal/platform/crypto"
+	"github.com/itsivali/lottery-platform/internal/platform/password"
 )
 
-// OTP purposes.
-const (
-	PurposeLogin        = "login"
-	PurposePayoutChange = "payout_change"
-	PurposeSSOLink      = "sso_link"
-)
-
-// Errors. Handlers map them to HTTP statuses; OTP failures are deliberately indistinguishable to avoid oracles.
+// Errors. Handlers map them to HTTP statuses. Credential failures are deliberately indistinguishable (wrong password,
+// unknown number, malformed number) so they cannot be used to discover which numbers have accounts.
 var (
-	ErrOTPInvalid        = errors.New("identity: invalid or expired code")
-	ErrTokenInvalid      = errors.New("identity: invalid token")
-	ErrTokenReuse        = errors.New("identity: refresh token reuse detected")
-	ErrDeviceCap         = errors.New("identity: too many accounts on this device")
-	ErrDeviceRequired    = errors.New("identity: device fingerprint required")
-	ErrAccountSuspended  = errors.New("identity: account suspended")
-	ErrSSONotLinked      = errors.New("identity: no account is linked to this identity")
-	ErrSSOAlreadyLinked  = errors.New("identity: this identity is already linked")
-	ErrKYCRequired       = errors.New("identity: KYC must be verified first")
-	ErrAttestationFailed = errors.New("identity: this device failed attestation")
+	ErrInvalidCredentials = errors.New("identity: invalid phone number or password")
+	ErrPhoneRegistered    = errors.New("identity: this number already belongs to a verified account")
+	ErrPhoneTaken         = errors.New("identity: another account has already proved this number")
+	ErrPhoneMismatch      = errors.New("identity: the confirmed number is not the one this account claims")
+	ErrPhoneNotVerified   = errors.New("identity: the phone number has not been verified yet")
+	ErrTokenInvalid       = errors.New("identity: invalid token")
+	ErrTokenReuse         = errors.New("identity: refresh token reuse detected")
+	ErrDeviceCap          = errors.New("identity: too many accounts on this device")
+	ErrDeviceRequired     = errors.New("identity: device fingerprint required")
+	ErrAccountSuspended   = errors.New("identity: account suspended")
+	ErrSSONotLinked       = errors.New("identity: no account is linked to this identity")
+	ErrSSOAlreadyLinked   = errors.New("identity: this identity is already linked")
+	ErrKYCRequired        = errors.New("identity: KYC must be verified first")
+	ErrAttestationFailed  = errors.New("identity: this device failed attestation")
 )
-
-// CooldownError reports that a new OTP cannot be requested yet.
-type CooldownError struct{ RetryAfter time.Duration }
-
-func (e *CooldownError) Error() string {
-	return "identity: wait " + e.RetryAfter.Round(time.Second).String() + " before requesting another code"
-}
-
-// SMS sends text messages (the real adapter lives in notifications).
-type SMS interface {
-	Send(ctx context.Context, msisdn, text string) error
-}
 
 // IDTokenVerifier validates a Google or Apple ID token (issuer, audience, expiry, signature, nonce) and returns the
 // stable subject.
@@ -57,15 +47,13 @@ type IDTokenVerifier interface {
 
 // Config carries secrets and tunables; secrets come from the deploy-time secret store.
 type Config struct {
-	OTPKey      []byte // HMAC key for OTP codes and device fingerprints (32+ bytes)
-	TokenKey    ed25519.PrivateKey
-	Issuer      string
-	Audience    string
-	AccessTTL   time.Duration // 10 minutes
-	RefreshTTL  time.Duration
-	OTPTTL      time.Duration // 5 minutes
-	OTPCooldown time.Duration // 60 seconds
-	DeviceCap   int           // accounts allowed per device (DECISION, default 2)
+	AuthKey    []byte // HMAC root key; password pepper and device-fingerprint keys are derived from it (32+ bytes)
+	TokenKey   ed25519.PrivateKey
+	Issuer     string
+	Audience   string
+	AccessTTL  time.Duration // 10 minutes
+	RefreshTTL time.Duration
+	DeviceCap  int // accounts allowed per device (DECISION, default 2)
 }
 
 // Device describes the calling device. AttestationToken is the opaque Play Integrity / App Attest token the app
@@ -102,18 +90,22 @@ type Principal struct{ UserID, SessionID string }
 
 // Service implements sign-in and session management.
 type Service struct {
-	pool  *pgxpool.Pool
-	clk   clock.Clock
-	sms   SMS
-	oidc  IDTokenVerifier
-	audit *audit.Writer
-	att   Attestor
-	cfg   Config
+	pool      *pgxpool.Pool
+	clk       clock.Clock
+	oidc      IDTokenVerifier
+	audit     *audit.Writer
+	att       Attestor
+	cfg       Config
+	pepper    []byte // password pepper, derived from cfg.AuthKey
+	dummyHash string // verified against when no account exists, so unknown numbers cost the same time as wrong passwords
 }
 
 // NewService returns a Service.
-func NewService(pool *pgxpool.Pool, clk clock.Clock, sms SMS, oidc IDTokenVerifier, a *audit.Writer, cfg Config) *Service {
-	return &Service{pool: pool, clk: clk, sms: sms, oidc: oidc, audit: a, att: UnavailableAttestor{}, cfg: cfg}
+func NewService(pool *pgxpool.Pool, clk clock.Clock, oidc IDTokenVerifier, a *audit.Writer, cfg Config) *Service {
+	s := &Service{pool: pool, clk: clk, oidc: oidc, audit: a, att: UnavailableAttestor{}, cfg: cfg}
+	s.pepper = crypto.MAC(cfg.AuthKey, "password-pepper")
+	s.dummyHash, _ = password.Hash("never matches: no account", s.pepper)
+	return s
 }
 
 // WithAttestor installs the device attestation verifier (it must be set before the service handles requests).

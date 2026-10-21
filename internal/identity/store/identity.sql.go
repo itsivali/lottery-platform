@@ -7,32 +7,8 @@ package store
 
 import (
 	"context"
-	"net/netip"
 	"time"
 )
-
-const bumpOTPAttempts = `-- name: BumpOTPAttempts :exec
-UPDATE identity.phone_otps SET attempts = attempts + 1 WHERE id = $1 AND attempts < 5
-`
-
-func (q *Queries) BumpOTPAttempts(ctx context.Context, id string) error {
-	_, err := q.db.Exec(ctx, bumpOTPAttempts, id)
-	return err
-}
-
-const consumeOTP = `-- name: ConsumeOTP :exec
-UPDATE identity.phone_otps SET consumed_at = $2 WHERE id = $1 AND consumed_at IS NULL
-`
-
-type ConsumeOTPParams struct {
-	ID         string
-	ConsumedAt *time.Time
-}
-
-func (q *Queries) ConsumeOTP(ctx context.Context, arg ConsumeOTPParams) error {
-	_, err := q.db.Exec(ctx, consumeOTP, arg.ID, arg.ConsumedAt)
-	return err
-}
 
 const countOtherAccountsOnDevice = `-- name: CountOtherAccountsOnDevice :one
 SELECT count(DISTINCT user_id) FROM identity.devices WHERE fingerprint_hash = $1 AND user_id <> $2
@@ -112,15 +88,18 @@ func (q *Queries) GetSessionDevice(ctx context.Context, id string) (GetSessionDe
 }
 
 const getUser = `-- name: GetUser :one
-SELECT id, msisdn, kyc_status, status, language FROM identity.users WHERE id = $1
+SELECT id, msisdn, kyc_status, status, language, password_hash, (msisdn_verified_at IS NOT NULL)::boolean AS phone_verified
+FROM identity.users WHERE id = $1
 `
 
 type GetUserRow struct {
-	ID        string
-	Msisdn    string
-	KycStatus string
-	Status    string
-	Language  string
+	ID            string
+	Msisdn        string
+	KycStatus     string
+	Status        string
+	Language      string
+	PasswordHash  *string
+	PhoneVerified bool
 }
 
 func (q *Queries) GetUser(ctx context.Context, id string) (GetUserRow, error) {
@@ -132,25 +111,29 @@ func (q *Queries) GetUser(ctx context.Context, id string) (GetUserRow, error) {
 		&i.KycStatus,
 		&i.Status,
 		&i.Language,
+		&i.PasswordHash,
+		&i.PhoneVerified,
 	)
 	return i, err
 }
 
-const getUserByMSISDN = `-- name: GetUserByMSISDN :one
-SELECT id, kyc_status, status FROM identity.users WHERE msisdn = $1
+const insertAccount = `-- name: InsertAccount :one
+INSERT INTO identity.users (msisdn, password_hash, password_changed_at, created_at, updated_at)
+VALUES ($1, $2, $3, $3, $3)
+RETURNING id
 `
 
-type GetUserByMSISDNRow struct {
-	ID        string
-	KycStatus string
-	Status    string
+type InsertAccountParams struct {
+	Msisdn       string
+	PasswordHash *string
+	At           *time.Time
 }
 
-func (q *Queries) GetUserByMSISDN(ctx context.Context, msisdn string) (GetUserByMSISDNRow, error) {
-	row := q.db.QueryRow(ctx, getUserByMSISDN, msisdn)
-	var i GetUserByMSISDNRow
-	err := row.Scan(&i.ID, &i.KycStatus, &i.Status)
-	return i, err
+func (q *Queries) InsertAccount(ctx context.Context, arg InsertAccountParams) (string, error) {
+	row := q.db.QueryRow(ctx, insertAccount, arg.Msisdn, arg.PasswordHash, arg.At)
+	var id string
+	err := row.Scan(&id)
+	return id, err
 }
 
 const insertAuthIdentity = `-- name: InsertAuthIdentity :exec
@@ -165,32 +148,6 @@ type InsertAuthIdentityParams struct {
 
 func (q *Queries) InsertAuthIdentity(ctx context.Context, arg InsertAuthIdentityParams) error {
 	_, err := q.db.Exec(ctx, insertAuthIdentity, arg.UserID, arg.Provider, arg.Subject)
-	return err
-}
-
-const insertOTP = `-- name: InsertOTP :exec
-INSERT INTO identity.phone_otps (msisdn, purpose, code_hmac, expires_at, ip, created_at)
-VALUES ($1, $2, $3, $4, $5::inet, $6)
-`
-
-type InsertOTPParams struct {
-	Msisdn    string
-	Purpose   string
-	CodeHmac  []byte
-	ExpiresAt time.Time
-	Ip        *netip.Addr
-	CreatedAt time.Time
-}
-
-func (q *Queries) InsertOTP(ctx context.Context, arg InsertOTPParams) error {
-	_, err := q.db.Exec(ctx, insertOTP,
-		arg.Msisdn,
-		arg.Purpose,
-		arg.CodeHmac,
-		arg.ExpiresAt,
-		arg.Ip,
-		arg.CreatedAt,
-	)
 	return err
 }
 
@@ -235,68 +192,6 @@ func (q *Queries) InsertSession(ctx context.Context, arg InsertSessionParams) (s
 	return id, err
 }
 
-const insertUser = `-- name: InsertUser :one
-INSERT INTO identity.users (msisdn) VALUES ($1)
-ON CONFLICT (msisdn) DO UPDATE SET msisdn = EXCLUDED.msisdn
-RETURNING id, (xmax = 0) AS created
-`
-
-type InsertUserRow struct {
-	ID      string
-	Created bool
-}
-
-func (q *Queries) InsertUser(ctx context.Context, msisdn string) (InsertUserRow, error) {
-	row := q.db.QueryRow(ctx, insertUser, msisdn)
-	var i InsertUserRow
-	err := row.Scan(&i.ID, &i.Created)
-	return i, err
-}
-
-const latestOTPCreatedAt = `-- name: LatestOTPCreatedAt :one
-SELECT created_at FROM identity.phone_otps
-WHERE msisdn = $1 AND purpose = $2
-ORDER BY created_at DESC LIMIT 1
-`
-
-type LatestOTPCreatedAtParams struct {
-	Msisdn  string
-	Purpose string
-}
-
-func (q *Queries) LatestOTPCreatedAt(ctx context.Context, arg LatestOTPCreatedAtParams) (time.Time, error) {
-	row := q.db.QueryRow(ctx, latestOTPCreatedAt, arg.Msisdn, arg.Purpose)
-	var created_at time.Time
-	err := row.Scan(&created_at)
-	return created_at, err
-}
-
-const lockActiveOTP = `-- name: LockActiveOTP :one
-SELECT id, code_hmac, attempts FROM identity.phone_otps
-WHERE msisdn = $1 AND purpose = $2 AND consumed_at IS NULL AND expires_at > $3 AND attempts < 5
-ORDER BY created_at DESC LIMIT 1
-FOR UPDATE
-`
-
-type LockActiveOTPParams struct {
-	Msisdn    string
-	Purpose   string
-	ExpiresAt time.Time
-}
-
-type LockActiveOTPRow struct {
-	ID       string
-	CodeHmac []byte
-	Attempts int16
-}
-
-func (q *Queries) LockActiveOTP(ctx context.Context, arg LockActiveOTPParams) (LockActiveOTPRow, error) {
-	row := q.db.QueryRow(ctx, lockActiveOTP, arg.Msisdn, arg.Purpose, arg.ExpiresAt)
-	var i LockActiveOTPRow
-	err := row.Scan(&i.ID, &i.CodeHmac, &i.Attempts)
-	return i, err
-}
-
 const lockRefreshToken = `-- name: LockRefreshToken :one
 SELECT id, session_id, expires_at, used_at FROM identity.refresh_tokens WHERE token_hash = $1 FOR UPDATE
 `
@@ -320,6 +215,77 @@ func (q *Queries) LockRefreshToken(ctx context.Context, tokenHash []byte) (LockR
 	return i, err
 }
 
+const lockUserPhone = `-- name: LockUserPhone :one
+SELECT msisdn, (msisdn_verified_at IS NOT NULL)::boolean AS verified FROM identity.users WHERE id = $1 FOR UPDATE
+`
+
+type LockUserPhoneRow struct {
+	Msisdn   string
+	Verified bool
+}
+
+func (q *Queries) LockUserPhone(ctx context.Context, id string) (LockUserPhoneRow, error) {
+	row := q.db.QueryRow(ctx, lockUserPhone, id)
+	var i LockUserPhoneRow
+	err := row.Scan(&i.Msisdn, &i.Verified)
+	return i, err
+}
+
+const loginCandidates = `-- name: LoginCandidates :many
+SELECT id, password_hash, status, (msisdn_verified_at IS NOT NULL)::boolean AS phone_verified
+FROM identity.users
+WHERE msisdn = $1 AND password_hash IS NOT NULL
+ORDER BY (msisdn_verified_at IS NULL), created_at DESC
+LIMIT 5
+`
+
+type LoginCandidatesRow struct {
+	ID            string
+	PasswordHash  *string
+	Status        string
+	PhoneVerified bool
+}
+
+// A number with a proved owner admits only that owner; otherwise the newest few unproved claims are tried.
+func (q *Queries) LoginCandidates(ctx context.Context, msisdn string) ([]LoginCandidatesRow, error) {
+	rows, err := q.db.Query(ctx, loginCandidates, msisdn)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []LoginCandidatesRow
+	for rows.Next() {
+		var i LoginCandidatesRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.PasswordHash,
+			&i.Status,
+			&i.PhoneVerified,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const markPhoneVerified = `-- name: MarkPhoneVerified :exec
+UPDATE identity.users SET msisdn_verified_at = $2, updated_at = $2 WHERE id = $1 AND msisdn_verified_at IS NULL
+`
+
+type MarkPhoneVerifiedParams struct {
+	ID               string
+	MsisdnVerifiedAt *time.Time
+}
+
+func (q *Queries) MarkPhoneVerified(ctx context.Context, arg MarkPhoneVerifiedParams) error {
+	_, err := q.db.Exec(ctx, markPhoneVerified, arg.ID, arg.MsisdnVerifiedAt)
+	return err
+}
+
 const markRefreshUsed = `-- name: MarkRefreshUsed :exec
 UPDATE identity.refresh_tokens SET used_at = $2 WHERE id = $1
 `
@@ -331,6 +297,22 @@ type MarkRefreshUsedParams struct {
 
 func (q *Queries) MarkRefreshUsed(ctx context.Context, arg MarkRefreshUsedParams) error {
 	_, err := q.db.Exec(ctx, markRefreshUsed, arg.ID, arg.UsedAt)
+	return err
+}
+
+const revokeOtherSessions = `-- name: RevokeOtherSessions :exec
+UPDATE identity.sessions SET revoked_at = $1, revoked_reason = 'password_change'
+WHERE user_id = $2 AND id <> $3 AND revoked_at IS NULL
+`
+
+type RevokeOtherSessionsParams struct {
+	At            *time.Time
+	UserID        string
+	KeepSessionID string
+}
+
+func (q *Queries) RevokeOtherSessions(ctx context.Context, arg RevokeOtherSessionsParams) error {
+	_, err := q.db.Exec(ctx, revokeOtherSessions, arg.At, arg.UserID, arg.KeepSessionID)
 	return err
 }
 
@@ -347,6 +329,21 @@ type RevokeSessionParams struct {
 
 func (q *Queries) RevokeSession(ctx context.Context, arg RevokeSessionParams) error {
 	_, err := q.db.Exec(ctx, revokeSession, arg.At, arg.Reason, arg.ID)
+	return err
+}
+
+const setPassword = `-- name: SetPassword :exec
+UPDATE identity.users SET password_hash = $2, password_changed_at = $3, updated_at = $3 WHERE id = $1
+`
+
+type SetPasswordParams struct {
+	ID                string
+	PasswordHash      *string
+	PasswordChangedAt *time.Time
+}
+
+func (q *Queries) SetPassword(ctx context.Context, arg SetPasswordParams) error {
+	_, err := q.db.Exec(ctx, setPassword, arg.ID, arg.PasswordHash, arg.PasswordChangedAt)
 	return err
 }
 
@@ -377,4 +374,15 @@ func (q *Queries) UpsertDevice(ctx context.Context, arg UpsertDeviceParams) (str
 	var id string
 	err := row.Scan(&id)
 	return id, err
+}
+
+const verifiedAccountExists = `-- name: VerifiedAccountExists :one
+SELECT EXISTS (SELECT 1 FROM identity.users WHERE msisdn = $1 AND msisdn_verified_at IS NOT NULL) ::boolean AS exists
+`
+
+func (q *Queries) VerifiedAccountExists(ctx context.Context, msisdn string) (bool, error) {
+	row := q.db.QueryRow(ctx, verifiedAccountExists, msisdn)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
 }

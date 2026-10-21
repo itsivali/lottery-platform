@@ -9,10 +9,12 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/itsivali/lottery-platform/internal/audit"
 	"github.com/itsivali/lottery-platform/internal/identity/store"
 	"github.com/itsivali/lottery-platform/internal/platform/crypto"
+	"github.com/itsivali/lottery-platform/internal/platform/password"
 )
 
 type accessClaims struct {
@@ -63,43 +65,154 @@ func (s *Service) startSession(ctx context.Context, q *store.Queries, userID str
 	return s.issue(ctx, q, userID, sid, nil, now)
 }
 
-// VerifyOTP completes a phone sign-in, creating the account on first use.
-func (s *Service) VerifyOTP(ctx context.Context, rawMSISDN, code string, dev Device) (Tokens, error) {
+// maxPasswordBytes bounds what Login will hash, so a huge "password" cannot be used to burn CPU.
+const maxPasswordBytes = 1024
+
+// Signup creates an account from a phone number and password and signs it in. The number is only a claim until the
+// player proves it with an M-Pesa confirmation, so several people may claim one number; a number that already has a
+// proved owner cannot be claimed again.
+func (s *Service) Signup(ctx context.Context, rawMSISDN, pw string, dev Device) (Tokens, error) {
 	msisdn, err := NormalizeMSISDN(rawMSISDN)
-	if err != nil {
-		return Tokens{}, ErrOTPInvalid
-	}
-	verdict := s.verdict(ctx, dev)
-	var tokens Tokens
-	var outcome error
-	err = s.withTx(ctx, func(tx pgx.Tx, q *store.Queries, now time.Time) error {
-		ok, err := s.checkOTP(ctx, q, now, msisdn, PurposeLogin, code)
-		if err != nil {
-			return err
-		}
-		if !ok {
-			outcome = ErrOTPInvalid // commit so the failed attempt is counted
-			return nil
-		}
-		u, err := q.InsertUser(ctx, msisdn)
-		if err != nil {
-			return err
-		}
-		if err := s.assertActive(ctx, q, u.ID); err != nil {
-			return err
-		}
-		if u.Created {
-			if err := s.audit.Record(ctx, tx, audit.Event{ActorType: audit.System, Action: "user.created", EntityType: "user", EntityID: u.ID}); err != nil {
-				return err
-			}
-		}
-		tokens, err = s.startSession(ctx, q, u.ID, dev, verdict, now)
-		return err
-	})
 	if err != nil {
 		return Tokens{}, err
 	}
-	return tokens, outcome
+	if err := password.CheckPolicy(pw, msisdn); err != nil {
+		return Tokens{}, err
+	}
+	hash, err := password.Hash(pw, s.pepper)
+	if err != nil {
+		return Tokens{}, err
+	}
+	verdict := s.verdict(ctx, dev)
+	var tokens Tokens
+	err = s.withTx(ctx, func(tx pgx.Tx, q *store.Queries, now time.Time) error {
+		taken, err := q.VerifiedAccountExists(ctx, msisdn)
+		if err != nil {
+			return err
+		}
+		if taken {
+			return ErrPhoneRegistered
+		}
+		id, err := q.InsertAccount(ctx, store.InsertAccountParams{Msisdn: msisdn, PasswordHash: &hash, At: &now})
+		if err != nil {
+			return err
+		}
+		if err := s.audit.Record(ctx, tx, audit.Event{ActorType: audit.System, Action: "user.created", EntityType: "user", EntityID: id}); err != nil {
+			return err
+		}
+		tokens, err = s.startSession(ctx, q, id, dev, verdict, now)
+		return err
+	})
+	return tokens, err
+}
+
+// Login checks a phone number and password. Every failure to authenticate returns the same error and costs the same
+// time, so the response does not reveal whether a number has an account.
+func (s *Service) Login(ctx context.Context, rawMSISDN, pw string, dev Device) (Tokens, error) {
+	msisdn, nerr := NormalizeMSISDN(rawMSISDN)
+	if nerr != nil || len(pw) > maxPasswordBytes {
+		_, _ = password.Verify(pw[:min(len(pw), maxPasswordBytes)], s.dummyHash, s.pepper)
+		return Tokens{}, ErrInvalidCredentials
+	}
+	cands, err := store.New(s.pool).LoginCandidates(ctx, msisdn)
+	if err != nil {
+		return Tokens{}, err
+	}
+	if len(cands) > 0 && cands[0].PhoneVerified {
+		cands = cands[:1] // the proved owner is the only one who may use this number
+	}
+	var matched *store.LoginCandidatesRow
+	for i := range cands {
+		if ok, verr := password.Verify(pw, *cands[i].PasswordHash, s.pepper); verr == nil && ok {
+			matched = &cands[i]
+			break
+		}
+	}
+	if len(cands) == 0 {
+		_, _ = password.Verify(pw, s.dummyHash, s.pepper)
+	}
+	if matched == nil {
+		return Tokens{}, ErrInvalidCredentials
+	}
+	if matched.Status != "active" {
+		return Tokens{}, ErrAccountSuspended
+	}
+	upgraded := ""
+	if password.NeedsRehash(*matched.PasswordHash) {
+		upgraded, _ = password.Hash(pw, s.pepper)
+	}
+	verdict := s.verdict(ctx, dev)
+	var tokens Tokens
+	err = s.withTx(ctx, func(_ pgx.Tx, q *store.Queries, now time.Time) error {
+		if upgraded != "" {
+			if err := q.SetPassword(ctx, store.SetPasswordParams{ID: matched.ID, PasswordHash: &upgraded, PasswordChangedAt: &now}); err != nil {
+				return err
+			}
+		}
+		var err error
+		tokens, err = s.startSession(ctx, q, matched.ID, dev, verdict, now)
+		return err
+	})
+	return tokens, err
+}
+
+// ChangePassword replaces the password after checking the current one, and ends every other session.
+func (s *Service) ChangePassword(ctx context.Context, userID, sessionID, current, next string) error {
+	u, err := store.New(s.pool).GetUser(ctx, userID)
+	if err != nil {
+		return err
+	}
+	if u.PasswordHash == nil || len(current) > maxPasswordBytes {
+		return ErrInvalidCredentials
+	}
+	if ok, verr := password.Verify(current, *u.PasswordHash, s.pepper); verr != nil || !ok {
+		return ErrInvalidCredentials
+	}
+	if err := password.CheckPolicy(next, u.Msisdn); err != nil {
+		return err
+	}
+	hash, err := password.Hash(next, s.pepper)
+	if err != nil {
+		return err
+	}
+	return s.withTx(ctx, func(tx pgx.Tx, q *store.Queries, now time.Time) error {
+		if err := q.SetPassword(ctx, store.SetPasswordParams{ID: userID, PasswordHash: &hash, PasswordChangedAt: &now}); err != nil {
+			return err
+		}
+		if err := q.RevokeOtherSessions(ctx, store.RevokeOtherSessionsParams{At: &now, UserID: userID, KeepSessionID: sessionID}); err != nil {
+			return err
+		}
+		return s.audit.Record(ctx, tx, audit.Event{ActorType: audit.Player, ActorID: userID, Action: "auth.password_changed", EntityType: "user", EntityID: userID})
+	})
+}
+
+// MarkPhoneVerified records that the player proved they control msisdn. The payments module calls it, inside the
+// transaction that verifies an STK confirmation, with the number the confirmation names (never one the client supplied).
+// It is idempotent for the same account; if another account proved the number first it returns ErrPhoneTaken.
+func (s *Service) MarkPhoneVerified(ctx context.Context, tx pgx.Tx, userID, confirmedMSISDN string) error {
+	q := store.New(tx)
+	row, err := q.LockUserPhone(ctx, userID)
+	if err != nil {
+		return err
+	}
+	if row.Msisdn != confirmedMSISDN {
+		return ErrPhoneMismatch
+	}
+	if row.Verified {
+		return nil
+	}
+	now, err := s.now(ctx, tx)
+	if err != nil {
+		return err
+	}
+	if err := q.MarkPhoneVerified(ctx, store.MarkPhoneVerifiedParams{ID: userID, MsisdnVerifiedAt: &now}); err != nil {
+		var pe *pgconn.PgError
+		if errors.As(err, &pe) && pe.Code == "23505" {
+			return ErrPhoneTaken
+		}
+		return err
+	}
+	return s.audit.Record(ctx, tx, audit.Event{ActorType: audit.System, Action: "user.phone_verified", EntityType: "user", EntityID: userID})
 }
 
 func (s *Service) assertActive(ctx context.Context, q *store.Queries, userID string) error {

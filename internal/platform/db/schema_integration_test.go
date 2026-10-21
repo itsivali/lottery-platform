@@ -473,3 +473,33 @@ func TestMigrateUpExclusive_ConcurrentStartersAllSucceedAndMigrateOnce(t *testin
 		t.Fatalf("%d version rows, %d distinct: a migration ran twice or not at all", versions, distinct)
 	}
 }
+
+func TestUsers_APhoneNumberIsUniqueOnlyOnceItIsVerified(t *testing.T) {
+	ctx, c := connect(t)
+	claim := func() string {
+		var id string
+		if err := c.QueryRow(ctx, `INSERT INTO identity.users (msisdn, password_hash) VALUES ('254712345678', 'h') RETURNING id::text`).Scan(&id); err != nil {
+			t.Fatalf("claiming an unverified number must be allowed any number of times: %v", err)
+		}
+		return id
+	}
+	a, b := claim(), claim()
+	mustExec(t, ctx, c, `UPDATE identity.users SET msisdn_verified_at = now() WHERE id = $1`, a)
+	_, err := c.Exec(ctx, `UPDATE identity.users SET msisdn_verified_at = now() WHERE id = $1`, b)
+	wantState(t, err, codeUniqueViolation) // someone else proved ownership first
+	claim()                                // an unverified claim of a verified number is still allowed; it can never be verified
+}
+
+func TestUsers_AVerifiedPhoneRequiresAPassword(t *testing.T) {
+	ctx, c := connect(t)
+	_, err := c.Exec(ctx, `INSERT INTO identity.users (msisdn, msisdn_verified_at) VALUES ('254712345678', now())`)
+	wantState(t, err, codeCheckViolation)
+}
+
+func TestSchema_SmsOtpTableIsGone(t *testing.T) {
+	ctx, c := connect(t)
+	var n int
+	if err := c.QueryRow(ctx, `SELECT count(*) FROM information_schema.tables WHERE table_schema = 'identity' AND table_name = 'phone_otps'`).Scan(&n); err != nil || n != 0 {
+		t.Fatalf("phone_otps exists: %d %v", n, err)
+	}
+}

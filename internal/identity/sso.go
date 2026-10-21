@@ -56,6 +56,9 @@ func (s *Service) LinkSSO(ctx context.Context, userID, provider, idToken, nonce 
 		if u.KycStatus != "verified" {
 			return ErrKYCRequired
 		}
+		if !u.PhoneVerified {
+			return ErrPhoneNotVerified
+		}
 		sub, err := s.verifyIDToken(ctx, provider, idToken, nonce)
 		if err != nil {
 			return err

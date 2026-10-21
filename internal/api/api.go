@@ -48,8 +48,8 @@ func Mount(d Deps) func(chi.Router) {
 			r.Use(idempotency.Middleware(d.Idem, h.idempotencyPrincipal, idempotency.Options{}))
 
 			// public (no token required)
-			r.Post("/auth/otp/request", h.otpRequest)
-			r.Post("/auth/otp/verify", h.otpVerify)
+			r.Post("/auth/signup", h.signup)
+			r.Post("/auth/login", h.login)
 			r.Post("/auth/refresh", h.refresh)
 			r.Post("/auth/sso/{provider}", h.ssoSignIn)
 
@@ -57,6 +57,7 @@ func Mount(d Deps) func(chi.Router) {
 			r.Group(func(r chi.Router) {
 				r.Use(requireAuth)
 				r.Post("/auth/logout", h.logout)
+				r.Post("/auth/password/change", h.changePassword)
 				r.Post("/auth/sso/{provider}/link", h.ssoLink)
 				r.Get("/kyc", h.kycStatus)
 				r.Post("/kyc", h.kycSubmit)

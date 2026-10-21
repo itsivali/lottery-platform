@@ -6,11 +6,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"regexp"
-	"sync"
 	"testing"
 	"time"
 
@@ -21,34 +20,18 @@ import (
 	"github.com/itsivali/lottery-platform/internal/platform/testvalkey"
 )
 
-// gateways are local stand-ins for the SMS and national-registry vendors.
-type gateways struct {
-	sms, registry *httptest.Server
-	mu            sync.Mutex
-	code          string
-	smsAuth       string
-}
-
-var digits = regexp.MustCompile(`\b\d{6}\b`)
+// gateways is a local stand-in for the national-registry vendor.
+type gateways struct{ registry *httptest.Server }
 
 func newGateways(t *testing.T) *gateways {
 	t.Helper()
 	g := &gateways{}
-	g.sms = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var in struct{ To, Message string }
-		_ = json.NewDecoder(r.Body).Decode(&in)
-		g.mu.Lock()
-		g.code, g.smsAuth = digits.FindString(in.Message), r.Header.Get("Authorization")
-		g.mu.Unlock()
-		w.WriteHeader(http.StatusAccepted)
-	}))
 	g.registry = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var in map[string]string
 		_ = json.NewDecoder(r.Body).Decode(&in)
 		ok := in["id_number"] == "12345678" && in["full_name"] == "Jane Wanjiru Kamau" && in["date_of_birth"] == "1990-05-17"
 		_ = json.NewEncoder(w).Encode(map[string]any{"found": in["id_number"] == "12345678", "name_match": ok, "dob_match": ok, "reference": "r1"})
 	}))
-	t.Cleanup(g.sms.Close)
 	t.Cleanup(g.registry.Close)
 	return g
 }
@@ -58,10 +41,10 @@ func baseCfg(t *testing.T, g *gateways, vk *testvalkey.Server) config.Config {
 	return config.Config{
 		DatabaseURL: "unused", WorkersInProcess: true,
 		API: config.API{
-			Enabled: true, OTPKey: bytes.Repeat([]byte("o"), 32), TokenSeed: bytes.Repeat([]byte("t"), 32), IdentityKey: bytes.Repeat([]byte("i"), 32),
+			Enabled: true, AuthKey: bytes.Repeat([]byte("o"), 32), TokenSeed: bytes.Repeat([]byte("t"), 32), IdentityKey: bytes.Repeat([]byte("i"), 32),
 			DataKeys: map[byte][]byte{1: bytes.Repeat([]byte("d"), 32)}, DataKeyActive: 1, ValkeyAddr: vk.Addr,
 			TrustedProxyHeader: "X-Forwarded-For", TrustedProxyHops: 1,
-			SMSURL: g.sms.URL, SMSKey: "sms-key", KYCURL: g.registry.URL, KYCKey: "kyc-key",
+			KYCURL: g.registry.URL, KYCKey: "kyc-key",
 		},
 	}
 }
@@ -110,19 +93,15 @@ func TestApp_FullJourneyThroughTheRealWiring(t *testing.T) {
 	srv := httptest.NewServer(httpx.NewRouterWith(pool, a.Mount))
 	t.Cleanup(srv.Close)
 
-	if c, _ := call(t, srv, http.MethodPost, "/v1/auth/otp/request", "", "k1", "198.51.100.1", map[string]any{"msisdn": "0712345678"}); c != 204 {
-		t.Fatalf("otp request = %d", c)
+	dev := map[string]any{"fingerprint": "fp", "platform": "android"}
+	if c, out := call(t, srv, http.MethodPost, "/v1/auth/signup", "", "k1", "198.51.100.1",
+		map[string]any{"msisdn": "0712345678", "password": "correct horse battery", "device": dev}); c != 201 {
+		t.Fatalf("signup = %d %v", c, out)
 	}
-	g.mu.Lock()
-	code, auth := g.code, g.smsAuth
-	g.mu.Unlock()
-	if len(code) != 6 || auth != "Bearer sms-key" {
-		t.Fatalf("sms gateway got code=%q auth=%q", code, auth)
-	}
-	c, tok := call(t, srv, http.MethodPost, "/v1/auth/otp/verify", "", "k2", "198.51.100.1",
-		map[string]any{"msisdn": "0712345678", "code": code, "device": map[string]any{"fingerprint": "fp", "platform": "android"}})
+	c, tok := call(t, srv, http.MethodPost, "/v1/auth/login", "", "k2", "198.51.100.1",
+		map[string]any{"msisdn": "0712345678", "password": "correct horse battery", "device": dev})
 	if c != 200 {
-		t.Fatalf("verify = %d %v", c, tok)
+		t.Fatalf("login = %d %v", c, tok)
 	}
 	access := tok["access_token"].(string)
 
@@ -154,19 +133,20 @@ func TestApp_PerClientLimitsUseTheTrustedProxyEntryNotWhatTheClientClaims(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { a.Close(context.Background()) })
+	t.Cleanup(func() { a.Close(ctx) })
 	srv := httptest.NewServer(httpx.NewRouterWith(pool, a.Mount))
 	t.Cleanup(srv.Close)
 
-	// 31 sign-in attempts from one real client (the rightmost entry), each claiming a different leftmost address:
-	// the per-IP limit (30/hour) must trip because the spoofed entries are ignored.
+	// 61 login attempts for different numbers from one real client (the rightmost entry), each claiming a different
+	// leftmost address: the per-IP limit (60/hour) must trip, because the spoofed entries are ignored.
 	var last int
-	for i := range 31 {
-		last, _ = call(t, srv, http.MethodPost, "/v1/auth/otp/verify", "", "key-"+string(rune('a'+i%26))+string(rune('A'+i/26)),
-			"9.9.9."+string(rune('0'+i%10))+", 203.0.113.50", map[string]any{"msisdn": "0712345678", "code": "000000", "device": map[string]any{"fingerprint": "f", "platform": "android"}})
+	for i := range 61 {
+		last, _ = call(t, srv, http.MethodPost, "/v1/auth/login", "", fmt.Sprintf("key-%d", i),
+			fmt.Sprintf("9.9.9.%d, 203.0.113.50", i%250),
+			map[string]any{"msisdn": fmt.Sprintf("07%08d", i), "password": "whatever it is 1", "device": map[string]any{"fingerprint": "f", "platform": "android"}})
 	}
 	if last != http.StatusTooManyRequests {
-		t.Fatalf("31st attempt = %d, want 429: a client must not dodge limits by inventing X-Forwarded-For entries", last)
+		t.Fatalf("61st attempt = %d, want 429: a client must not dodge limits by inventing X-Forwarded-For entries", last)
 	}
 }
 

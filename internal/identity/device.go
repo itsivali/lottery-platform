@@ -9,7 +9,7 @@ import (
 	"github.com/itsivali/lottery-platform/internal/platform/crypto"
 )
 
-func (s *Service) fingerprintHash(fp string) []byte { return crypto.MAC(s.cfg.OTPKey, "device", fp) }
+func (s *Service) fingerprintHash(fp string) []byte { return crypto.MAC(s.cfg.AuthKey, "device", fp) }
 
 // registerDevice records the device and enforces the device-to-account cap. Mobile platforms must send a
 // fingerprint; the web has none and is limited by IP and CAPTCHA instead.

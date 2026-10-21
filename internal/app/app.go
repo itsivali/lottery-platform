@@ -23,7 +23,6 @@ import (
 	"github.com/itsivali/lottery-platform/internal/audit"
 	"github.com/itsivali/lottery-platform/internal/identity"
 	"github.com/itsivali/lottery-platform/internal/kyc"
-	"github.com/itsivali/lottery-platform/internal/notifications"
 	"github.com/itsivali/lottery-platform/internal/platform/clock"
 	"github.com/itsivali/lottery-platform/internal/platform/config"
 	"github.com/itsivali/lottery-platform/internal/platform/crypto"
@@ -73,10 +72,6 @@ func New(ctx context.Context, cfg config.Config, pool *pgxpool.Pool) (*App, erro
 	clk := clock.Postgres{}
 
 	// Anything not configured fails closed instead of pretending to work.
-	var sms identity.SMS = notifications.UnavailableSMS{}
-	if c.SMSURL != "" {
-		sms = notifications.NewHTTPSMS(c.SMSURL, c.SMSKey, hc)
-	}
 	var provider kyc.Provider = kyc.UnavailableProvider{}
 	if c.KYCURL != "" {
 		provider = kyc.NewHTTPProvider(c.KYCURL, c.KYCKey, hc)
@@ -89,9 +84,9 @@ func New(ctx context.Context, cfg config.Config, pool *pgxpool.Pool) (*App, erro
 	idKey := c.IdentityKey
 	a.kyc = kyc.NewService(pool, clk, provider, keyring, idKey, aw, kyc.NewRiverEnqueuer(insertOnly, 0))
 
-	idSvc := identity.NewService(pool, clk, sms, oidcVerifier(clock.Wall{}, hc, c), aw, identity.Config{
-		OTPKey: c.OTPKey, TokenKey: ed25519.NewKeyFromSeed(c.TokenSeed), Issuer: issuer, Audience: audience,
-		AccessTTL: 10 * time.Minute, RefreshTTL: 30 * 24 * time.Hour, OTPTTL: 5 * time.Minute, OTPCooldown: time.Minute, DeviceCap: 2,
+	idSvc := identity.NewService(pool, clk, oidcVerifier(clock.Wall{}, hc, c), aw, identity.Config{
+		AuthKey: c.AuthKey, TokenKey: ed25519.NewKeyFromSeed(c.TokenSeed), Issuer: issuer, Audience: audience,
+		AccessTTL: 10 * time.Minute, RefreshTTL: 30 * 24 * time.Hour, DeviceCap: 2,
 	})
 
 	a.Mount = api.Mount(api.Deps{
@@ -102,7 +97,7 @@ func New(ctx context.Context, cfg config.Config, pool *pgxpool.Pool) (*App, erro
 		TrustedProxyHeader: c.TrustedProxyHeader, TrustedProxyHops: c.TrustedProxyHops,
 	})
 	slog.InfoContext(ctx, "v1 API enabled", "trusted_proxy_header", c.TrustedProxyHeader, "trusted_proxy_hops", c.TrustedProxyHops,
-		"sms", c.SMSURL != "", "kyc_registry", c.KYCURL != "", "google", c.GoogleClientID != "", "apple", c.AppleClientID != "")
+		"kyc_registry", c.KYCURL != "", "google", c.GoogleClientID != "", "apple", c.AppleClientID != "")
 	return a, nil
 }
 

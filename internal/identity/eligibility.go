@@ -9,19 +9,43 @@ import (
 	"github.com/itsivali/lottery-platform/internal/identity/store"
 )
 
-// AssertEligible refuses accounts that may not transact: suspended or closed accounts and anyone whose national ID is
-// not verified (which also keeps under-18s out, since they can never be verified). Top-ups and plays call it inside
-// the same transaction as the money movement (invariant 12), alongside rg.AssertNotRestricted.
-func (s *Service) AssertEligible(ctx context.Context, tx pgx.Tx, userID string) error {
+func (s *Service) loadActive(ctx context.Context, tx pgx.Tx, userID string) (store.GetUserRow, error) {
 	u, err := store.New(tx).GetUser(ctx, userID)
+	if err != nil {
+		return u, err
+	}
+	if u.Status != "active" {
+		return u, ErrAccountSuspended
+	}
+	return u, nil
+}
+
+// AssertCanTopUp refuses accounts that may not start a top-up: suspended or closed accounts and anyone whose national
+// ID is not verified (which also keeps under-18s out, since they can never be verified). The phone need not be proved
+// yet: the first top-up is what proves it. Called inside the same transaction as the top-up (invariant 12).
+func (s *Service) AssertCanTopUp(ctx context.Context, tx pgx.Tx, userID string) error {
+	u, err := s.loadActive(ctx, tx, userID)
 	if err != nil {
 		return err
 	}
-	if u.Status != "active" {
-		return ErrAccountSuspended
+	if u.KycStatus != "verified" {
+		return ErrKYCRequired
+	}
+	return nil
+}
+
+// AssertCanPlay is AssertCanTopUp plus a proved phone number, which is what pays out and receives alerts. Called inside
+// the same transaction as the debit.
+func (s *Service) AssertCanPlay(ctx context.Context, tx pgx.Tx, userID string) error {
+	u, err := s.loadActive(ctx, tx, userID)
+	if err != nil {
+		return err
 	}
 	if u.KycStatus != "verified" {
 		return ErrKYCRequired
+	}
+	if !u.PhoneVerified {
+		return ErrPhoneNotVerified
 	}
 	return nil
 }

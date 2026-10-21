@@ -3,12 +3,14 @@ package api
 import (
 	"errors"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 
 	"github.com/itsivali/lottery-platform/internal/identity"
 	"github.com/itsivali/lottery-platform/internal/platform/httpx"
+	"github.com/itsivali/lottery-platform/internal/platform/password"
 )
 
 type deviceJSON struct {
@@ -33,16 +35,17 @@ func writeTokens(w http.ResponseWriter, t identity.Tokens) {
 	httpx.WriteJSON(w, http.StatusOK, tokensJSON{AccessToken: t.Access, RefreshToken: t.Refresh, ExpiresAt: t.AccessExpires})
 }
 
-// authError maps identity errors to problem responses. OTP failures are deliberately uniform.
+// authError maps identity errors to problem responses. Credential failures are deliberately uniform.
 func authError(w http.ResponseWriter, err error) {
-	var cd *identity.CooldownError
 	switch {
-	case errors.As(err, &cd):
-		httpx.WriteProblemRetry(w, http.StatusTooManyRequests, "otp-cooldown", "Please wait before requesting another code", "", int(cd.RetryAfter.Seconds())+1)
 	case errors.Is(err, identity.ErrInvalidMSISDN):
 		httpx.WriteProblem(w, http.StatusBadRequest, "invalid-msisdn", "Invalid phone number", "use a Kenyan mobile number such as 0712345678")
-	case errors.Is(err, identity.ErrOTPInvalid):
-		httpx.WriteProblem(w, http.StatusUnauthorized, "invalid-code", "Invalid or expired code", "")
+	case errors.Is(err, password.ErrWeak):
+		httpx.WriteProblem(w, http.StatusBadRequest, "weak-password", "Password too weak", strings.TrimPrefix(err.Error(), "password: too weak: "))
+	case errors.Is(err, identity.ErrInvalidCredentials):
+		httpx.WriteProblem(w, http.StatusUnauthorized, "invalid-credentials", "Invalid phone number or password", "")
+	case errors.Is(err, identity.ErrPhoneRegistered):
+		httpx.WriteProblem(w, http.StatusConflict, "phone-registered", "This number already has an account", "sign in instead")
 	case errors.Is(err, identity.ErrTokenReuse), errors.Is(err, identity.ErrTokenInvalid):
 		httpx.WriteProblem(w, http.StatusUnauthorized, "invalid-token", "Invalid token", "")
 	case errors.Is(err, identity.ErrDeviceRequired):
@@ -58,48 +61,83 @@ func authError(w http.ResponseWriter, err error) {
 		httpx.WriteProblem(w, http.StatusConflict, "sso-already-linked", "Identity already linked", "")
 	case errors.Is(err, identity.ErrKYCRequired):
 		httpx.WriteProblem(w, http.StatusForbidden, "kyc-required", "Identity verification required", "")
+	case errors.Is(err, identity.ErrPhoneNotVerified):
+		httpx.WriteProblem(w, http.StatusForbidden, "phone-not-verified", "Phone number not verified yet", "make your first top-up to verify it")
 	default:
 		internalError(w, err)
 	}
 }
 
-func (h *handlers) otpRequest(w http.ResponseWriter, r *http.Request) {
-	var in struct {
-		MSISDN string `json:"msisdn"`
-	}
+type credentialsJSON struct {
+	MSISDN   string     `json:"msisdn"`
+	Password string     `json:"password"`
+	Device   deviceJSON `json:"device"`
+}
+
+func (h *handlers) signup(w http.ResponseWriter, r *http.Request) {
+	var in credentialsJSON
 	if !httpx.DecodeJSON(w, r, &in) {
 		return
 	}
-	msisdn, err := identity.NormalizeMSISDN(in.MSISDN)
+	// limits first, keyed on the normalised number so formatting tricks cannot dodge them
+	key := in.MSISDN
+	if n, err := identity.NormalizeMSISDN(in.MSISDN); err == nil {
+		key = n
+	}
+	if !h.limit(w, r, "signup:ip:"+h.clientIP(r), 10, time.Hour) || !h.limit(w, r, "signup:msisdn:"+key, 5, 24*time.Hour) {
+		return
+	}
+	t, err := h.Identity.Signup(r.Context(), in.MSISDN, in.Password, in.Device.toDevice())
 	if err != nil {
 		authError(w, err)
 		return
 	}
-	if !h.limit(w, r, "otp:msisdn:"+msisdn, 5, time.Hour) || !h.limit(w, r, "otp:ip:"+h.clientIP(r), 20, time.Hour) {
-		return
-	}
-	if err := h.Identity.RequestOTP(r.Context(), msisdn, identity.PurposeLogin, h.clientIP(r)); err != nil {
-		authError(w, err)
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
+	httpx.WriteJSON(w, http.StatusCreated, tokensJSON{AccessToken: t.Access, RefreshToken: t.Refresh, ExpiresAt: t.AccessExpires})
 }
 
-func (h *handlers) otpVerify(w http.ResponseWriter, r *http.Request) {
-	var in struct {
-		MSISDN string     `json:"msisdn"`
-		Code   string     `json:"code"`
-		Device deviceJSON `json:"device"`
-	}
-	if !httpx.DecodeJSON(w, r, &in) || !h.limit(w, r, "otp-verify:ip:"+h.clientIP(r), 30, time.Hour) {
+func (h *handlers) login(w http.ResponseWriter, r *http.Request) {
+	var in credentialsJSON
+	if !httpx.DecodeJSON(w, r, &in) {
 		return
 	}
-	t, err := h.Identity.VerifyOTP(r.Context(), in.MSISDN, in.Code, in.Device.toDevice())
+	key := in.MSISDN
+	if n, err := identity.NormalizeMSISDN(in.MSISDN); err == nil {
+		key = n
+	}
+	// the per-number budget is what stops password guessing against one account, the per-IP one stops sweeping many
+	if !h.limit(w, r, "login:msisdn:"+key, 10, time.Hour) || !h.limit(w, r, "login:ip:"+h.clientIP(r), 60, time.Hour) {
+		return
+	}
+	t, err := h.Identity.Login(r.Context(), in.MSISDN, in.Password, in.Device.toDevice())
 	if err != nil {
 		authError(w, err)
 		return
 	}
 	writeTokens(w, t)
+}
+
+func (h *handlers) changePassword(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Current string `json:"current_password"`
+		New     string `json:"new_password"`
+	}
+	if !httpx.DecodeJSON(w, r, &in) {
+		return
+	}
+	p, _ := principalFrom(r.Context())
+	if !h.limit(w, r, "pwchange:user:"+p.UserID, 10, time.Hour) {
+		return
+	}
+	if err := h.Identity.ChangePassword(r.Context(), p.UserID, p.SessionID, in.Current, in.New); err != nil {
+		if errors.Is(err, identity.ErrInvalidCredentials) {
+			// 403, not 401: the caller's token is fine, so clients must not treat this as an expired session
+			httpx.WriteProblem(w, http.StatusForbidden, "wrong-password", "Current password is incorrect", "")
+			return
+		}
+		authError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (h *handlers) refresh(w http.ResponseWriter, r *http.Request) {

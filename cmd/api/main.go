@@ -52,7 +52,7 @@ func run(log *slog.Logger) error {
 	}
 	defer application.Close(context.Background())
 	if application.Mount == nil {
-		log.Warn("v1 API not configured: serving health probes only (set OTP_KEY, TOKEN_SEED, DATA_KEY(S), IDENTITY_KEY, VALKEY_ADDR and TRUSTED_PROXY_HEADER to enable it)")
+		log.Warn("v1 API not configured: serving health probes only (set AUTH_KEY, TOKEN_SEED, DATA_KEY(S), IDENTITY_KEY, VALKEY_ADDR and TRUSTED_PROXY_HEADER to enable it)")
 	}
 	if cfg.WorkersInProcess {
 		if err := application.StartWorkers(ctx); err != nil {

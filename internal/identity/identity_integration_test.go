@@ -8,7 +8,6 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
-	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -20,37 +19,9 @@ import (
 	"github.com/itsivali/lottery-platform/internal/audit"
 	"github.com/itsivali/lottery-platform/internal/identity"
 	"github.com/itsivali/lottery-platform/internal/platform/clock"
+	"github.com/itsivali/lottery-platform/internal/platform/password"
 	"github.com/itsivali/lottery-platform/internal/platform/testpg"
 )
-
-type fakeSMS struct {
-	mu    sync.Mutex
-	codes map[string]string
-	sent  int
-	fail  error
-}
-
-var digits = regexp.MustCompile(`\b\d{6}\b`)
-
-func (f *fakeSMS) Send(_ context.Context, msisdn, text string) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if f.fail != nil {
-		return f.fail
-	}
-	f.sent++
-	if f.codes == nil {
-		f.codes = map[string]string{}
-	}
-	f.codes[msisdn] = digits.FindString(text)
-	return nil
-}
-
-func (f *fakeSMS) code(msisdn string) string {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.codes[msisdn]
-}
 
 // fakeOIDC accepts tokens of the form "ok:<subject>" and refuses everything else.
 type fakeOIDC struct{}
@@ -72,11 +43,13 @@ func (fakeOIDC) VerifyIDToken(_ context.Context, provider, token, nonce string) 
 type env struct {
 	pool *pgxpool.Pool
 	clk  *clock.Manual
-	sms  *fakeSMS
 	svc  *identity.Service
+	seen map[string]bool
 }
 
 var start = time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC)
+
+const goodPassword = "correct horse battery"
 
 func setup(t *testing.T) *env {
 	t.Helper()
@@ -85,10 +58,10 @@ func setup(t *testing.T) *env {
 	if err != nil {
 		t.Fatal(err)
 	}
-	e := &env{pool: pool, clk: clock.NewManual(start), sms: &fakeSMS{}}
-	e.svc = identity.NewService(pool, e.clk, e.sms, fakeOIDC{}, audit.NewWriter(), identity.Config{
-		OTPKey: []byte("0123456789abcdef0123456789abcdef"), TokenKey: priv, Issuer: "lottery", Audience: "lottery-api",
-		AccessTTL: 10 * time.Minute, RefreshTTL: 30 * 24 * time.Hour, OTPTTL: 5 * time.Minute, OTPCooldown: 60 * time.Second, DeviceCap: 2,
+	e := &env{pool: pool, clk: clock.NewManual(start), seen: map[string]bool{}}
+	e.svc = identity.NewService(pool, e.clk, fakeOIDC{}, audit.NewWriter(), identity.Config{
+		AuthKey: []byte("0123456789abcdef0123456789abcdef"), TokenKey: priv, Issuer: "lottery", Audience: "lottery-api",
+		AccessTTL: 10 * time.Minute, RefreshTTL: 30 * 24 * time.Hour, DeviceCap: 2,
 	})
 	return e
 }
@@ -97,150 +70,33 @@ var seq int
 
 func (e *env) newMSISDN() string { seq++; return fmt.Sprintf("2547%08d", seq) }
 
+// login signs the number up the first time it is seen and logs it in afterwards, with the standard test password.
 func (e *env) login(t *testing.T, msisdn string, dev identity.Device) identity.Tokens {
 	t.Helper()
 	ctx := context.Background()
-	if err := e.svc.RequestOTP(ctx, msisdn, identity.PurposeLogin, "203.0.113.9"); err != nil {
-		t.Fatalf("RequestOTP: %v", err)
+	var tok identity.Tokens
+	var err error
+	if e.seen[msisdn] {
+		tok, err = e.svc.Login(ctx, msisdn, goodPassword, dev)
+	} else {
+		tok, err = e.svc.Signup(ctx, msisdn, goodPassword, dev)
+		e.seen[msisdn] = true
 	}
-	tok, err := e.svc.VerifyOTP(ctx, msisdn, e.sms.code(msisdn), dev)
 	if err != nil {
-		t.Fatalf("VerifyOTP: %v", err)
+		t.Fatalf("sign in %s: %v", msisdn, err)
 	}
 	return tok
 }
 
+// verifyPhone marks a signed-up number as proved, as the payments module will after an STK confirmation.
+func (e *env) verifyPhone(t *testing.T, userID, msisdn string) {
+	t.Helper()
+	if err := pgx.BeginFunc(context.Background(), e.pool, func(tx pgx.Tx) error { return e.svc.MarkPhoneVerified(context.Background(), tx, userID, msisdn) }); err != nil {
+		t.Fatalf("MarkPhoneVerified: %v", err)
+	}
+}
+
 var phone = identity.Device{Fingerprint: "fp-1", Platform: "android"}
-
-func TestOTP_RequestSendsASixDigitCodeAndStoresOnlyItsMAC(t *testing.T) {
-	e := setup(t)
-	m := e.newMSISDN()
-	if err := e.svc.RequestOTP(context.Background(), m, identity.PurposeLogin, "203.0.113.9"); err != nil {
-		t.Fatal(err)
-	}
-	code := e.sms.code(m)
-	if len(code) != 6 {
-		t.Fatalf("code = %q", code)
-	}
-	var hmacLen int
-	var plain bool
-	if err := e.pool.QueryRow(context.Background(), `SELECT length(code_hmac), position($1 in encode(code_hmac,'escape')) > 0 FROM identity.phone_otps`, code).Scan(&hmacLen, &plain); err != nil {
-		t.Fatal(err)
-	}
-	if hmacLen != 32 || plain {
-		t.Fatalf("hmac length %d, plaintext visible %v", hmacLen, plain)
-	}
-}
-
-func TestOTP_RejectsMalformedNumbers(t *testing.T) {
-	e := setup(t)
-	if err := e.svc.RequestOTP(context.Background(), "12345", identity.PurposeLogin, ""); !errors.Is(err, identity.ErrInvalidMSISDN) {
-		t.Fatalf("err = %v", err)
-	}
-	if e.sms.sent != 0 {
-		t.Fatal("SMS sent for an invalid number")
-	}
-}
-
-func TestOTP_ResendIsBlockedUntilTheCooldownPasses(t *testing.T) {
-	e := setup(t)
-	ctx := context.Background()
-	m := e.newMSISDN()
-	if err := e.svc.RequestOTP(ctx, m, identity.PurposeLogin, ""); err != nil {
-		t.Fatal(err)
-	}
-	e.clk.Advance(30 * time.Second)
-	var cd *identity.CooldownError
-	if err := e.svc.RequestOTP(ctx, m, identity.PurposeLogin, ""); !errors.As(err, &cd) || cd.RetryAfter != 30*time.Second {
-		t.Fatalf("err = %v, want cooldown of 30s", err)
-	}
-	e.clk.Advance(31 * time.Second)
-	if err := e.svc.RequestOTP(ctx, m, identity.PurposeLogin, ""); err != nil {
-		t.Fatalf("after cooldown: %v", err)
-	}
-}
-
-func TestOTP_SMSFailureIsReported(t *testing.T) {
-	e := setup(t)
-	e.sms.fail = errors.New("gateway down")
-	if err := e.svc.RequestOTP(context.Background(), e.newMSISDN(), identity.PurposeLogin, ""); err == nil {
-		t.Fatal("SMS failure swallowed")
-	}
-}
-
-func TestOTP_VerifyCreatesTheAccountOnFirstLoginAndReusesItAfter(t *testing.T) {
-	e := setup(t)
-	m := e.newMSISDN()
-	first := e.login(t, m, phone)
-	e.clk.Advance(2 * time.Minute)
-	second := e.login(t, m, phone)
-	a, err := e.svc.Authenticate(context.Background(), first.Access)
-	if err != nil {
-		t.Fatal(err)
-	}
-	b, err := e.svc.Authenticate(context.Background(), second.Access)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if a.UserID != b.UserID || a.SessionID == b.SessionID {
-		t.Fatalf("same user expected with distinct sessions: %+v %+v", a, b)
-	}
-}
-
-func TestOTP_CodeIsSingleUse(t *testing.T) {
-	e := setup(t)
-	ctx := context.Background()
-	m := e.newMSISDN()
-	e.login(t, m, phone)
-	if _, err := e.svc.VerifyOTP(ctx, m, e.sms.code(m), phone); !errors.Is(err, identity.ErrOTPInvalid) {
-		t.Fatalf("reuse err = %v", err)
-	}
-}
-
-func TestOTP_WrongCodeIsRefusedAndFiveFailuresBurnTheCode(t *testing.T) {
-	e := setup(t)
-	ctx := context.Background()
-	m := e.newMSISDN()
-	if err := e.svc.RequestOTP(ctx, m, identity.PurposeLogin, ""); err != nil {
-		t.Fatal(err)
-	}
-	right := e.sms.code(m)
-	wrong := "000000"
-	if right == wrong {
-		wrong = "000001"
-	}
-	for i := range 5 {
-		if _, err := e.svc.VerifyOTP(ctx, m, wrong, phone); !errors.Is(err, identity.ErrOTPInvalid) {
-			t.Fatalf("attempt %d err = %v", i, err)
-		}
-	}
-	if _, err := e.svc.VerifyOTP(ctx, m, right, phone); !errors.Is(err, identity.ErrOTPInvalid) {
-		t.Fatalf("correct code accepted after 5 failures: %v", err)
-	}
-}
-
-func TestOTP_ExpiresAfterFiveMinutes(t *testing.T) {
-	e := setup(t)
-	m := e.newMSISDN()
-	if err := e.svc.RequestOTP(context.Background(), m, identity.PurposeLogin, ""); err != nil {
-		t.Fatal(err)
-	}
-	e.clk.Advance(5*time.Minute + time.Second)
-	if _, err := e.svc.VerifyOTP(context.Background(), m, e.sms.code(m), phone); !errors.Is(err, identity.ErrOTPInvalid) {
-		t.Fatalf("expired code accepted: %v", err)
-	}
-}
-
-func TestOTP_CodeForAnotherNumberIsRefused(t *testing.T) {
-	e := setup(t)
-	ctx := context.Background()
-	a, b := e.newMSISDN(), e.newMSISDN()
-	_ = e.svc.RequestOTP(ctx, a, identity.PurposeLogin, "")
-	_ = e.svc.RequestOTP(ctx, b, identity.PurposeLogin, "")
-	if _, err := e.svc.VerifyOTP(ctx, b, e.sms.code(a), phone); !errors.Is(err, identity.ErrOTPInvalid) && e.sms.code(a) != e.sms.code(b) {
-		t.Fatalf("a's code opened b's account: %v", err)
-	}
-}
 
 func TestAccessToken_AuthenticatesUntilItExpiresOrTheSessionEnds(t *testing.T) {
 	e := setup(t)
@@ -359,48 +215,6 @@ func TestRefresh_UnknownExpiredAndWrongDeviceTokensAreRefused(t *testing.T) {
 	}
 }
 
-func TestDevices_ThirdAccountOnTheSameDeviceIsRefused(t *testing.T) {
-	e := setup(t)
-	ctx := context.Background()
-	dev := identity.Device{Fingerprint: "shared-phone", Platform: "android"}
-	a, b, c := e.newMSISDN(), e.newMSISDN(), e.newMSISDN()
-	e.login(t, a, dev)
-	e.login(t, b, dev)
-	e.clk.Advance(2 * time.Minute)
-	e.login(t, a, dev) // existing link: allowed
-	if err := e.svc.RequestOTP(ctx, c, identity.PurposeLogin, ""); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := e.svc.VerifyOTP(ctx, c, e.sms.code(c), dev); !errors.Is(err, identity.ErrDeviceCap) {
-		t.Fatalf("third account err = %v, want ErrDeviceCap", err)
-	}
-}
-
-func TestDevices_MobileLoginWithoutAFingerprintIsRefused(t *testing.T) {
-	e := setup(t)
-	m := e.newMSISDN()
-	_ = e.svc.RequestOTP(context.Background(), m, identity.PurposeLogin, "")
-	_, err := e.svc.VerifyOTP(context.Background(), m, e.sms.code(m), identity.Device{Platform: "android"})
-	if !errors.Is(err, identity.ErrDeviceRequired) {
-		t.Fatalf("err = %v, want ErrDeviceRequired", err)
-	}
-}
-
-func TestSuspendedAccountsCannotLogIn(t *testing.T) {
-	e := setup(t)
-	ctx := context.Background()
-	m := e.newMSISDN()
-	e.login(t, m, phone)
-	if _, err := e.pool.Exec(ctx, `UPDATE identity.users SET status = 'suspended' WHERE msisdn = $1`, m); err != nil {
-		t.Fatal(err)
-	}
-	e.clk.Advance(2 * time.Minute)
-	_ = e.svc.RequestOTP(ctx, m, identity.PurposeLogin, "")
-	if _, err := e.svc.VerifyOTP(ctx, m, e.sms.code(m), phone); !errors.Is(err, identity.ErrAccountSuspended) {
-		t.Fatalf("err = %v, want ErrAccountSuspended", err)
-	}
-}
-
 func TestSSO_LinkingRequiresAVerifiedKYCAndSignInRequiresALink(t *testing.T) {
 	e := setup(t)
 	ctx := context.Background()
@@ -414,7 +228,7 @@ func TestSSO_LinkingRequiresAVerifiedKYCAndSignInRequiresALink(t *testing.T) {
 	if err := e.svc.LinkSSO(ctx, p.UserID, "google", "ok:g-123", "n1"); !errors.Is(err, identity.ErrKYCRequired) {
 		t.Fatalf("link before KYC err = %v", err)
 	}
-	if _, err := e.pool.Exec(ctx, `UPDATE identity.users SET kyc_status='verified', national_id_hash='\x01' WHERE id = $1`, p.UserID); err != nil {
+	if _, err := e.pool.Exec(ctx, `UPDATE identity.users SET kyc_status='verified', national_id_hash='\x01', msisdn_verified_at = now() WHERE id = $1`, p.UserID); err != nil {
 		t.Fatal(err)
 	}
 	if err := e.svc.LinkSSO(ctx, p.UserID, "google", "ok:g-123", "n1"); err != nil {
@@ -435,7 +249,7 @@ func TestSSO_SubjectCannotBeLinkedToTwoAccountsAndBadTokensAreRefused(t *testing
 	mk := func(fp string) string {
 		tok := e.login(t, e.newMSISDN(), identity.Device{Fingerprint: fp, Platform: "android"})
 		p, _ := e.svc.Authenticate(ctx, tok.Access)
-		if _, err := e.pool.Exec(ctx, `UPDATE identity.users SET kyc_status='verified', national_id_hash=decode(md5($1::text),'hex') WHERE id = $2::uuid`, p.UserID, p.UserID); err != nil {
+		if _, err := e.pool.Exec(ctx, `UPDATE identity.users SET kyc_status='verified', msisdn_verified_at = now(), national_id_hash=decode(md5($1::text),'hex') WHERE id = $2::uuid`, p.UserID, p.UserID); err != nil {
 			t.Fatal(err)
 		}
 		return p.UserID
@@ -455,34 +269,48 @@ func TestSSO_SubjectCannotBeLinkedToTwoAccountsAndBadTokensAreRefused(t *testing
 	}
 }
 
-func TestEligibility_OnlyActiveKYCVerifiedAccountsMayTransact(t *testing.T) {
+func TestEligibility_TopUpNeedsAVerifiedIDAndPlayAlsoNeedsAProvedPhone(t *testing.T) {
 	e := setup(t)
 	ctx := context.Background()
-	tok := e.login(t, e.newMSISDN(), phone)
+	m := e.newMSISDN()
+	tok := e.login(t, m, phone)
 	p, _ := e.svc.Authenticate(ctx, tok.Access)
-	check := func() error {
-		return pgx.BeginFunc(ctx, e.pool, func(tx pgx.Tx) error { return e.svc.AssertEligible(ctx, tx, p.UserID) })
+	topUp := func() error {
+		return pgx.BeginFunc(ctx, e.pool, func(tx pgx.Tx) error { return e.svc.AssertCanTopUp(ctx, tx, p.UserID) })
+	}
+	play := func() error {
+		return pgx.BeginFunc(ctx, e.pool, func(tx pgx.Tx) error { return e.svc.AssertCanPlay(ctx, tx, p.UserID) })
 	}
 	for _, st := range []string{"none", "pending", "manual_review", "rejected"} {
 		if _, err := e.pool.Exec(ctx, `UPDATE identity.users SET kyc_status = $1 WHERE id = $2`, st, p.UserID); err != nil {
 			t.Fatal(err)
 		}
-		if err := check(); !errors.Is(err, identity.ErrKYCRequired) {
-			t.Errorf("kyc %s: err = %v, want ErrKYCRequired", st, err)
+		if err := topUp(); !errors.Is(err, identity.ErrKYCRequired) {
+			t.Errorf("kyc %s: top-up err = %v, want ErrKYCRequired", st, err)
 		}
 	}
 	if _, err := e.pool.Exec(ctx, `UPDATE identity.users SET kyc_status='verified', national_id_hash='\x02' WHERE id = $1`, p.UserID); err != nil {
 		t.Fatal(err)
 	}
-	if err := check(); err != nil {
-		t.Fatalf("verified active account refused: %v", err)
+	if err := topUp(); err != nil {
+		t.Fatalf("a KYC-verified account must be able to start the top-up that proves its phone: %v", err)
+	}
+	if err := play(); !errors.Is(err, identity.ErrPhoneNotVerified) {
+		t.Fatalf("play before the phone is proved: %v, want ErrPhoneNotVerified", err)
+	}
+	e.verifyPhone(t, p.UserID, m)
+	if err := play(); err != nil {
+		t.Fatalf("play after the phone is proved: %v", err)
 	}
 	for _, st := range []string{"suspended", "closed"} {
 		if _, err := e.pool.Exec(ctx, `UPDATE identity.users SET status = $1 WHERE id = $2`, st, p.UserID); err != nil {
 			t.Fatal(err)
 		}
-		if err := check(); !errors.Is(err, identity.ErrAccountSuspended) {
-			t.Errorf("status %s: err = %v", st, err)
+		if err := topUp(); !errors.Is(err, identity.ErrAccountSuspended) {
+			t.Errorf("status %s: top-up err = %v", st, err)
+		}
+		if err := play(); !errors.Is(err, identity.ErrAccountSuspended) {
+			t.Errorf("status %s: play err = %v", st, err)
 		}
 	}
 }
@@ -560,5 +388,210 @@ func TestAttestation_FailedDevicesCannotTransactAndStrictModeRequiresAPass(t *te
 		if !errors.Is(err, c.wantErr) {
 			t.Errorf("%s: err = %v, want %v", c.name, err, c.wantErr)
 		}
+	}
+}
+
+func TestSignup_CreatesAnUnverifiedAccountWithAHashedPassword(t *testing.T) {
+	e := setup(t)
+	ctx := context.Background()
+	m := e.newMSISDN()
+	tok := e.login(t, m, phone)
+	p, err := e.svc.Authenticate(ctx, tok.Access)
+	if err != nil {
+		t.Fatalf("signup tokens do not work: %v", err)
+	}
+	var hash string
+	var verified bool
+	if err := e.pool.QueryRow(ctx, `SELECT password_hash, msisdn_verified_at IS NOT NULL FROM identity.users WHERE id = $1`, p.UserID).Scan(&hash, &verified); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(hash, "$argon2id$") || strings.Contains(hash, goodPassword) {
+		t.Fatalf("stored password hash = %q", hash)
+	}
+	if verified {
+		t.Fatal("a new account must not have a proved phone")
+	}
+	var audits int
+	_ = e.pool.QueryRow(ctx, `SELECT count(*) FROM audit.audit_log WHERE action = 'user.created' AND entity_id = $1`, p.UserID).Scan(&audits)
+	if audits != 1 {
+		t.Fatalf("%d user.created audit rows", audits)
+	}
+}
+
+func TestSignup_RefusesBadNumbersWeakPasswordsAndNumbersAlreadyProved(t *testing.T) {
+	e := setup(t)
+	ctx := context.Background()
+	if _, err := e.svc.Signup(ctx, "12345", goodPassword, phone); !errors.Is(err, identity.ErrInvalidMSISDN) {
+		t.Errorf("bad number: %v", err)
+	}
+	if _, err := e.svc.Signup(ctx, e.newMSISDN(), "password", phone); !errors.Is(err, password.ErrWeak) {
+		t.Errorf("weak password: %v", err)
+	}
+	m := e.newMSISDN()
+	tok := e.login(t, m, phone)
+	p, _ := e.svc.Authenticate(ctx, tok.Access)
+	e.verifyPhone(t, p.UserID, m)
+	other := identity.Device{Fingerprint: "other-phone", Platform: "android"}
+	if _, err := e.svc.Signup(ctx, m, "another strong one", other); !errors.Is(err, identity.ErrPhoneRegistered) {
+		t.Errorf("signing up a proved number: %v, want ErrPhoneRegistered", err)
+	}
+}
+
+func TestLogin_OnlyTheRightPasswordOpensTheAccountAndFailuresAreIndistinguishable(t *testing.T) {
+	e := setup(t)
+	ctx := context.Background()
+	m := e.newMSISDN()
+	e.login(t, m, phone)
+	if _, err := e.svc.Login(ctx, m, goodPassword, phone); err != nil {
+		t.Fatalf("right password: %v", err)
+	}
+	for name, c := range map[string]struct{ msisdn, pw string }{
+		"wrong password": {m, "wrong password 1"}, "unknown number": {e.newMSISDN(), goodPassword}, "malformed number": {"nope", goodPassword}, "empty password": {m, ""},
+	} {
+		if _, err := e.svc.Login(ctx, c.msisdn, c.pw, phone); !errors.Is(err, identity.ErrInvalidCredentials) {
+			t.Errorf("%s: err = %v, want ErrInvalidCredentials", name, err)
+		}
+	}
+}
+
+func TestLogin_SuspendedAccountsAreRefusedOnlyAfterTheRightPassword(t *testing.T) {
+	e := setup(t)
+	ctx := context.Background()
+	m := e.newMSISDN()
+	e.login(t, m, phone)
+	if _, err := e.pool.Exec(ctx, `UPDATE identity.users SET status = 'suspended' WHERE msisdn = $1`, m); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.svc.Login(ctx, m, goodPassword, phone); !errors.Is(err, identity.ErrAccountSuspended) {
+		t.Errorf("right password: %v, want ErrAccountSuspended", err)
+	}
+	if _, err := e.svc.Login(ctx, m, "wrong password 1", phone); !errors.Is(err, identity.ErrInvalidCredentials) {
+		t.Errorf("wrong password must not reveal the suspension: %v", err)
+	}
+}
+
+func TestClaims_SeveralPeopleMayClaimANumberButOnlyTheOneWhoProvesItKeepsIt(t *testing.T) {
+	e := setup(t)
+	ctx := context.Background()
+	m := e.newMSISDN()
+	squatter, err := e.svc.Signup(ctx, m, "squatters password 1", identity.Device{Fingerprint: "squatter-phone", Platform: "android"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner, err := e.svc.Signup(ctx, m, "the real owners password", identity.Device{Fingerprint: "owner-phone", Platform: "android"})
+	if err != nil {
+		t.Fatalf("a squatter's unverified claim must not block the real owner: %v", err)
+	}
+	// each claimant gets into their own account
+	if _, err := e.svc.Login(ctx, m, "squatters password 1", phone); err != nil {
+		t.Errorf("squatter's own login: %v", err)
+	}
+	if _, err := e.svc.Login(ctx, m, "the real owners password", phone); err != nil {
+		t.Errorf("owner's login: %v", err)
+	}
+	ownerP, _ := e.svc.Authenticate(ctx, owner.Access)
+	squatterP, _ := e.svc.Authenticate(ctx, squatter.Access)
+	e.verifyPhone(t, ownerP.UserID, m) // the owner passes the M-Pesa proof first
+	if err := pgx.BeginFunc(ctx, e.pool, func(tx pgx.Tx) error { return e.svc.MarkPhoneVerified(ctx, tx, squatterP.UserID, m) }); !errors.Is(err, identity.ErrPhoneTaken) {
+		t.Errorf("squatter verifying a proved number: %v, want ErrPhoneTaken", err)
+	}
+	if _, err := e.svc.Login(ctx, m, "squatters password 1", phone); !errors.Is(err, identity.ErrInvalidCredentials) {
+		t.Errorf("squatter can still log in after the owner proved the number: %v", err)
+	}
+	if _, err := e.svc.Login(ctx, m, "the real owners password", phone); err != nil {
+		t.Errorf("owner locked out: %v", err)
+	}
+}
+
+func TestMarkPhoneVerified_RulesAndIdempotence(t *testing.T) {
+	e := setup(t)
+	ctx := context.Background()
+	m := e.newMSISDN()
+	tok := e.login(t, m, phone)
+	p, _ := e.svc.Authenticate(ctx, tok.Access)
+	mark := func(user, msisdn string) error {
+		return pgx.BeginFunc(ctx, e.pool, func(tx pgx.Tx) error { return e.svc.MarkPhoneVerified(ctx, tx, user, msisdn) })
+	}
+	if err := mark(p.UserID, e.newMSISDN()); !errors.Is(err, identity.ErrPhoneMismatch) {
+		t.Errorf("payer number differs from the claimed number: %v, want ErrPhoneMismatch", err)
+	}
+	if err := mark(p.UserID, m); err != nil {
+		t.Fatal(err)
+	}
+	var first time.Time
+	_ = e.pool.QueryRow(ctx, `SELECT msisdn_verified_at FROM identity.users WHERE id = $1`, p.UserID).Scan(&first)
+	e.clk.Advance(time.Hour)
+	if err := mark(p.UserID, m); err != nil {
+		t.Errorf("repeating the proof must be harmless: %v", err)
+	}
+	var second time.Time
+	_ = e.pool.QueryRow(ctx, `SELECT msisdn_verified_at FROM identity.users WHERE id = $1`, p.UserID).Scan(&second)
+	if !first.Equal(second) {
+		t.Errorf("verification time moved: %v -> %v", first, second)
+	}
+	if err := mark("00000000-0000-7000-8000-000000000999", m); err == nil {
+		t.Error("an unknown account was verified")
+	}
+}
+
+func TestChangePassword(t *testing.T) {
+	e := setup(t)
+	ctx := context.Background()
+	m := e.newMSISDN()
+	current := e.login(t, m, phone)
+	other, err := e.svc.Login(ctx, m, goodPassword, identity.Device{Fingerprint: "second-device", Platform: "android"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, _ := e.svc.Authenticate(ctx, current.Access)
+	if err := e.svc.ChangePassword(ctx, p.UserID, p.SessionID, "not my password 1", "a brand new passphrase"); !errors.Is(err, identity.ErrInvalidCredentials) {
+		t.Errorf("wrong current password: %v", err)
+	}
+	if err := e.svc.ChangePassword(ctx, p.UserID, p.SessionID, goodPassword, "password"); !errors.Is(err, password.ErrWeak) {
+		t.Errorf("weak new password: %v", err)
+	}
+	if err := e.svc.ChangePassword(ctx, p.UserID, p.SessionID, goodPassword, "a brand new passphrase"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.svc.Login(ctx, m, goodPassword, phone); !errors.Is(err, identity.ErrInvalidCredentials) {
+		t.Errorf("old password still works: %v", err)
+	}
+	if _, err := e.svc.Login(ctx, m, "a brand new passphrase", phone); err != nil {
+		t.Errorf("new password: %v", err)
+	}
+	if _, err := e.svc.Authenticate(ctx, current.Access); err != nil {
+		t.Errorf("the session that changed the password must survive: %v", err)
+	}
+	if _, err := e.svc.Authenticate(ctx, other.Access); !errors.Is(err, identity.ErrTokenInvalid) {
+		t.Errorf("another device's session survived a password change: %v", err)
+	}
+	if _, err := e.svc.Refresh(ctx, other.Refresh, "second-device"); !errors.Is(err, identity.ErrTokenInvalid) {
+		t.Errorf("another device's refresh token survived a password change: %v", err)
+	}
+}
+
+func TestDevices_ThirdAccountOnTheSameDeviceIsRefused(t *testing.T) {
+	e := setup(t)
+	ctx := context.Background()
+	dev := identity.Device{Fingerprint: "shared-phone", Platform: "android"}
+	a, b := e.newMSISDN(), e.newMSISDN()
+	e.login(t, a, dev)
+	e.login(t, b, dev)
+	e.login(t, a, dev) // an existing link is allowed
+	if _, err := e.svc.Signup(ctx, e.newMSISDN(), goodPassword, dev); !errors.Is(err, identity.ErrDeviceCap) {
+		t.Fatalf("third account err = %v, want ErrDeviceCap", err)
+	}
+	// the refused signup must not leave an account behind
+	var n int
+	_ = e.pool.QueryRow(ctx, `SELECT count(*) FROM identity.users`).Scan(&n)
+	if n != 2 {
+		t.Fatalf("%d accounts exist, want 2", n)
+	}
+}
+
+func TestDevices_MobileSignupWithoutAFingerprintIsRefused(t *testing.T) {
+	e := setup(t)
+	if _, err := e.svc.Signup(context.Background(), e.newMSISDN(), goodPassword, identity.Device{Platform: "android"}); !errors.Is(err, identity.ErrDeviceRequired) {
+		t.Fatalf("err = %v, want ErrDeviceRequired", err)
 	}
 }

@@ -13,7 +13,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -35,25 +34,6 @@ import (
 	"github.com/itsivali/lottery-platform/internal/platform/testvalkey"
 	"github.com/itsivali/lottery-platform/internal/rg"
 )
-
-type fakeSMS struct {
-	mu    sync.Mutex
-	codes map[string]string
-}
-
-var sixDigits = regexp.MustCompile(`\b\d{6}\b`)
-
-func (f *fakeSMS) Send(_ context.Context, msisdn, text string) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if f.codes == nil {
-		f.codes = map[string]string{}
-	}
-	f.codes[msisdn] = sixDigits.FindString(text)
-	return nil
-}
-
-func (f *fakeSMS) code(m string) string { f.mu.Lock(); defer f.mu.Unlock(); return f.codes[m] }
 
 type fakeOIDC struct{}
 
@@ -96,7 +76,6 @@ func (e *env) drainKYC(t *testing.T) {
 type env struct {
 	pool *pgxpool.Pool
 	clk  *clock.Manual
-	sms  *fakeSMS
 	kyc  *kyc.Mock
 	vk   *testvalkey.Server
 	srv  *httptest.Server
@@ -110,7 +89,6 @@ func setup(t *testing.T) *env {
 	vk := testvalkey.Start(t)
 	_, priv, _ := ed25519.GenerateKey(rand.Reader)
 	clk := clock.NewManual(time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC))
-	sms := &fakeSMS{}
 	aw := audit.NewWriter()
 	k := make([]byte, 32)
 	_, _ = rand.Read(k)
@@ -118,9 +96,9 @@ func setup(t *testing.T) *env {
 	mock := kyc.NewMock()
 	enq := &kycQueue{}
 	deps := api.Deps{
-		Identity: identity.NewService(pool, clk, sms, fakeOIDC{}, aw, identity.Config{
-			OTPKey: []byte("0123456789abcdef0123456789abcdef"), TokenKey: priv, Issuer: "lottery", Audience: "lottery-api",
-			AccessTTL: 10 * time.Minute, RefreshTTL: 30 * 24 * time.Hour, OTPTTL: 5 * time.Minute, OTPCooldown: time.Minute, DeviceCap: 2,
+		Identity: identity.NewService(pool, clk, fakeOIDC{}, aw, identity.Config{
+			AuthKey: []byte("0123456789abcdef0123456789abcdef"), TokenKey: priv, Issuer: "lottery", Audience: "lottery-api",
+			AccessTTL: 10 * time.Minute, RefreshTTL: 30 * 24 * time.Hour, DeviceCap: 2,
 		}),
 		KYC:     kyc.NewService(pool, clk, mock, kr, []byte("0123456789abcdef0123456789abcdef"), aw, enq),
 		RG:      rg.NewService(pool, clk, aw, rg.Config{CoolingOff: 24 * time.Hour}),
@@ -130,7 +108,7 @@ func setup(t *testing.T) *env {
 	srv := httptest.NewServer(httpx.NewRouterWith(pool, api.Mount(deps)))
 	enq.process = func(ctx context.Context, id string) error { return deps.KYC.Process(ctx, id) }
 	t.Cleanup(srv.Close)
-	return &env{pool: pool, clk: clk, sms: sms, kyc: mock, vk: vk, srv: srv, enq: enq}
+	return &env{pool: pool, clk: clk, kyc: mock, vk: vk, srv: srv, enq: enq}
 }
 
 type resp struct {
@@ -180,20 +158,19 @@ func (e *env) msisdn() string { seq++; return fmt.Sprintf("07%08d", seq) }
 
 type session struct{ access, refresh, fp, msisdn string }
 
+const strongPassword = "correct horse battery"
+
 func (e *env) signIn(t *testing.T) session {
 	t.Helper()
 	m := e.msisdn()
 	fp := fmt.Sprintf("fp-%d", seq)
-	if r := e.do(t, http.MethodPost, "/v1/auth/otp/request", "", map[string]any{"msisdn": m}); r.Code != http.StatusNoContent {
-		t.Fatalf("otp request: %d %s", r.Code, r.Raw)
+	r := e.do(t, http.MethodPost, "/v1/auth/signup", "", map[string]any{
+		"msisdn": m, "password": strongPassword, "device": map[string]any{"fingerprint": fp, "platform": "android"},
+	})
+	if r.Code != http.StatusCreated {
+		t.Fatalf("signup: %d %s", r.Code, r.Raw)
 	}
 	norm, _ := identity.NormalizeMSISDN(m)
-	r := e.do(t, http.MethodPost, "/v1/auth/otp/verify", "", map[string]any{
-		"msisdn": m, "code": e.sms.code(norm), "device": map[string]any{"fingerprint": fp, "platform": "android"},
-	})
-	if r.Code != http.StatusOK {
-		t.Fatalf("otp verify: %d %s", r.Code, r.Raw)
-	}
 	return session{access: r.Body["access_token"].(string), refresh: r.Body["refresh_token"].(string), fp: fp, msisdn: norm}
 }
 
@@ -223,7 +200,7 @@ func TestAPI_SignInRefreshAndLogoutFlow(t *testing.T) {
 type route struct{ method, path string }
 
 var authedRoutes = []route{
-	{http.MethodPost, "/v1/auth/sso/google/link"},
+	{http.MethodPost, "/v1/auth/sso/google/link"}, {http.MethodPost, "/v1/auth/password/change"},
 	{http.MethodGet, "/v1/kyc"}, {http.MethodPost, "/v1/kyc"},
 	{http.MethodGet, "/v1/rg/limits"}, {http.MethodPut, "/v1/rg/limits"},
 	{http.MethodPost, "/v1/rg/timeout"}, {http.MethodPost, "/v1/rg/self-exclusion"},
@@ -264,7 +241,7 @@ func TestAPI_EveryWriteRequiresAnIdempotencyKey(t *testing.T) {
 	e := setup(t)
 	s := e.signIn(t)
 	writes := append([]route{
-		{http.MethodPost, "/v1/auth/otp/request"}, {http.MethodPost, "/v1/auth/otp/verify"},
+		{http.MethodPost, "/v1/auth/signup"}, {http.MethodPost, "/v1/auth/login"},
 		{http.MethodPost, "/v1/auth/refresh"}, {http.MethodPost, "/v1/auth/sso/google"},
 	}, authedRoutes...)
 	for _, rt := range writes {
@@ -346,25 +323,76 @@ func TestAPI_ReplayedRequestsReturnTheStoredResponseWithoutRepeatingTheEffect(t 
 	}
 }
 
-func TestAPI_OTPRequestsAreRateLimitedPerNumberAndFailClosedWithoutValkey(t *testing.T) {
+func TestAPI_LoginGuessingIsStoppedPerNumberAndFailsClosedWithoutValkey(t *testing.T) {
 	e := setup(t)
-	m := e.msisdn()
-	norm, _ := identity.NormalizeMSISDN(m)
-	_ = norm
-	for i := 1; i <= 5; i++ {
-		r := e.do(t, http.MethodPost, "/v1/auth/otp/request", "", map[string]any{"msisdn": m})
-		if i == 1 && r.Code != http.StatusNoContent {
-			t.Fatalf("first request: %d", r.Code)
-		}
-		e.clk.Advance(2 * time.Minute) // clear the 60s resend cooldown so only the hourly limiter can refuse
+	s := e.signIn(t)
+	login := func(pw string) resp {
+		return e.do(t, http.MethodPost, "/v1/auth/login", "", map[string]any{
+			"msisdn": s.msisdn, "password": pw, "device": map[string]any{"fingerprint": s.fp, "platform": "android"},
+		})
 	}
-	r := e.do(t, http.MethodPost, "/v1/auth/otp/request", "", map[string]any{"msisdn": m})
+	for i := 1; i <= 10; i++ {
+		if r := login("not the password " + fmt.Sprint(i)); r.Code != http.StatusUnauthorized {
+			t.Fatalf("guess %d = %d, want 401", i, r.Code)
+		}
+	}
+	r := login(strongPassword) // even the right password is refused once the budget for this number is spent
 	if r.Code != http.StatusTooManyRequests || r.Header.Get("Retry-After") == "" {
-		t.Fatalf("6th request: %d retry-after=%q", r.Code, r.Header.Get("Retry-After"))
+		t.Fatalf("11th attempt: %d retry-after=%q, want 429", r.Code, r.Header.Get("Retry-After"))
 	}
 	e.vk.Stop()
-	if r := e.do(t, http.MethodPost, "/v1/auth/otp/request", "", map[string]any{"msisdn": e.msisdn()}); r.Code != http.StatusServiceUnavailable {
+	if r := e.do(t, http.MethodPost, "/v1/auth/signup", "", map[string]any{"msisdn": e.msisdn(), "password": strongPassword, "device": map[string]any{"fingerprint": "x", "platform": "android"}}); r.Code != http.StatusServiceUnavailable {
 		t.Fatalf("Valkey down: %d, want 503 (fail closed)", r.Code)
+	}
+}
+
+func TestAPI_SignupIsRateLimitedPerNumber(t *testing.T) {
+	e := setup(t)
+	m := e.msisdn()
+	var last int
+	for i := range 6 {
+		last = e.do(t, http.MethodPost, "/v1/auth/signup", "", map[string]any{
+			"msisdn": m, "password": fmt.Sprintf("claim password %d", i), "device": map[string]any{"fingerprint": fmt.Sprintf("claimer-%d", i), "platform": "android"},
+		}).Code
+		if i < 5 && last != http.StatusCreated {
+			t.Fatalf("claim %d = %d, want 201", i, last)
+		}
+	}
+	if last != http.StatusTooManyRequests {
+		t.Fatalf("6th claim of one number = %d, want 429", last)
+	}
+}
+
+func TestAPI_LoginAndPasswordChange(t *testing.T) {
+	e := setup(t)
+	s := e.signIn(t)
+	dev := map[string]any{"fingerprint": s.fp, "platform": "android"}
+	r := e.do(t, http.MethodPost, "/v1/auth/login", "", map[string]any{"msisdn": s.msisdn, "password": strongPassword, "device": dev})
+	if r.Code != http.StatusOK || r.Body["access_token"] == nil {
+		t.Fatalf("login: %d %s", r.Code, r.Raw)
+	}
+	other := r.Body["access_token"].(string)
+	for name, body := range map[string]map[string]any{
+		"wrong current": {"current_password": "nope nope nope", "new_password": "a brand new passphrase"},
+		"weak new":      {"current_password": strongPassword, "new_password": "password"},
+		"unknown field": {"current_password": strongPassword, "new_password": "a brand new passphrase", "user_id": "x"},
+	} {
+		want := map[string]int{"wrong current": 403, "weak new": 400, "unknown field": 400}[name]
+		if got := e.do(t, http.MethodPost, "/v1/auth/password/change", s.access, body); got.Code != want {
+			t.Errorf("%s: %d, want %d (%s)", name, got.Code, want, got.Raw)
+		}
+	}
+	if c := e.do(t, http.MethodPost, "/v1/auth/password/change", s.access, map[string]any{"current_password": strongPassword, "new_password": "a brand new passphrase"}); c.Code != 204 {
+		t.Fatalf("change: %d %s", c.Code, c.Raw)
+	}
+	if got := e.do(t, http.MethodGet, "/v1/kyc", other, nil); got.Code != http.StatusUnauthorized {
+		t.Errorf("another session survived the password change: %d", got.Code)
+	}
+	if got := e.do(t, http.MethodGet, "/v1/kyc", s.access, nil); got.Code != http.StatusOK {
+		t.Errorf("the session that changed it was ended: %d", got.Code)
+	}
+	if got := e.do(t, http.MethodPost, "/v1/auth/login", "", map[string]any{"msisdn": s.msisdn, "password": strongPassword, "device": dev}); got.Code != http.StatusUnauthorized {
+		t.Errorf("old password still works: %d", got.Code)
 	}
 }
 
@@ -377,11 +405,13 @@ func TestAPI_ErrorMapping(t *testing.T) {
 		body   any
 		want   int
 	}{
-		{"invalid number", http.MethodPost, "/v1/auth/otp/request", map[string]any{"msisdn": "12345"}, 400},
-		{"unknown field", http.MethodPost, "/v1/auth/otp/request", map[string]any{"msisdn": "0712345678", "admin": true}, 400},
-		{"not json", http.MethodPost, "/v1/auth/otp/request", "hello", 400},
-		{"oversized body", http.MethodPost, "/v1/auth/otp/request", `{"msisdn":"` + strings.Repeat("1", 2<<20) + `"}`, 413},
-		{"wrong code", http.MethodPost, "/v1/auth/otp/verify", map[string]any{"msisdn": "0712345678", "code": "000000", "device": map[string]any{"fingerprint": "f", "platform": "android"}}, 401},
+		{"invalid number", http.MethodPost, "/v1/auth/signup", map[string]any{"msisdn": "12345", "password": strongPassword, "device": map[string]any{"fingerprint": "f", "platform": "android"}}, 400},
+		{"weak password", http.MethodPost, "/v1/auth/signup", map[string]any{"msisdn": "0712345678", "password": "password", "device": map[string]any{"fingerprint": "f", "platform": "android"}}, 400},
+		{"missing device fingerprint", http.MethodPost, "/v1/auth/signup", map[string]any{"msisdn": "0712345678", "password": strongPassword, "device": map[string]any{"platform": "android"}}, 400},
+		{"unknown field", http.MethodPost, "/v1/auth/signup", map[string]any{"msisdn": "0712345678", "password": strongPassword, "admin": true}, 400},
+		{"not json", http.MethodPost, "/v1/auth/signup", "hello", 400},
+		{"oversized body", http.MethodPost, "/v1/auth/signup", `{"msisdn":"` + strings.Repeat("1", 2<<20) + `"}`, 413},
+		{"unknown account", http.MethodPost, "/v1/auth/login", map[string]any{"msisdn": "0712345678", "password": strongPassword, "device": map[string]any{"fingerprint": "f", "platform": "android"}}, 401},
 		{"unknown sso provider", http.MethodPost, "/v1/auth/sso/facebook", map[string]any{"id_token": "x", "nonce": "n1"}, 404},
 		{"unlinked sso", http.MethodPost, "/v1/auth/sso/google", map[string]any{"id_token": "ok:nobody", "nonce": "n1"}, 409},
 		{"bad refresh token", http.MethodPost, "/v1/auth/refresh", map[string]any{"refresh_token": "nope", "device_fingerprint": "f"}, 401},
@@ -394,12 +424,6 @@ func TestAPI_ErrorMapping(t *testing.T) {
 		if r.Code >= 400 && !strings.HasPrefix(r.Header.Get("Content-Type"), "application/problem+json") {
 			t.Errorf("%s: error is not problem+json: %q", c.name, r.Header.Get("Content-Type"))
 		}
-	}
-	// cooldown between OTP requests
-	m := e.msisdn()
-	e.do(t, http.MethodPost, "/v1/auth/otp/request", "", map[string]any{"msisdn": m})
-	if r := e.do(t, http.MethodPost, "/v1/auth/otp/request", "", map[string]any{"msisdn": m}); r.Code != http.StatusTooManyRequests || r.Header.Get("Retry-After") == "" {
-		t.Errorf("cooldown: %d retry-after=%q", r.Code, r.Header.Get("Retry-After"))
 	}
 }
 
@@ -483,16 +507,15 @@ func TestAPI_ResponsibleGamingRoundTrip(t *testing.T) {
 func TestAPI_ClientClaimedAttestationIsNeverTrusted(t *testing.T) {
 	e := setup(t)
 	m := e.msisdn()
-	norm, _ := identity.NormalizeMSISDN(m)
-	e.do(t, http.MethodPost, "/v1/auth/otp/request", "", map[string]any{"msisdn": m})
-	// the attestation field is not part of the request contract; sending it is refused
-	r := e.do(t, http.MethodPost, "/v1/auth/otp/verify", "", `{"msisdn":"`+m+`","code":"`+e.sms.code(norm)+`","device":{"fingerprint":"fp","platform":"android","attestation":"passed"}}`)
+	// the attestation verdict is not part of the request contract; sending one is refused
+	r := e.do(t, http.MethodPost, "/v1/auth/signup", "", `{"msisdn":"`+m+`","password":"`+strongPassword+`","device":{"fingerprint":"fp","platform":"android","attestation":"passed"}}`)
 	if r.Code != http.StatusBadRequest {
 		t.Fatalf("client attestation claim accepted: %d %s", r.Code, r.Raw)
 	}
-	r = e.do(t, http.MethodPost, "/v1/auth/otp/verify", "", map[string]any{"msisdn": m, "code": e.sms.code(norm), "device": map[string]any{"fingerprint": "fp", "platform": "android"}})
-	if r.Code != 200 {
-		t.Fatalf("verify: %d %s", r.Code, r.Raw)
+	// an opaque token is accepted but, with no verifier configured, never yields a pass
+	r = e.do(t, http.MethodPost, "/v1/auth/signup", "", map[string]any{"msisdn": m, "password": strongPassword, "device": map[string]any{"fingerprint": "fp", "platform": "android", "attestation_token": "looks-valid"}})
+	if r.Code != http.StatusCreated {
+		t.Fatalf("signup: %d %s", r.Code, r.Raw)
 	}
 	var verdict string
 	_ = e.pool.QueryRow(context.Background(), `SELECT attestation_verdict FROM identity.devices`).Scan(&verdict)

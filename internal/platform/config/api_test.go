@@ -14,20 +14,20 @@ func b64(n int) string { return base64.StdEncoding.EncodeToString([]byte(strings
 func fullAPIEnv(t *testing.T) {
 	t.Helper()
 	t.Setenv("DATABASE_URL", "postgres://x")
-	t.Setenv("OTP_KEY", b64(32))
+	t.Setenv("AUTH_KEY", b64(32))
 	t.Setenv("TOKEN_SEED", b64(32))
 	t.Setenv("DATA_KEYS", "1:"+b64(32))
 	t.Setenv("IDENTITY_KEY", b64(32))
 	t.Setenv("VALKEY_ADDR", "valkey:6379")
 	t.Setenv("TRUSTED_PROXY_HEADER", "X-Forwarded-For")
-	for _, k := range []string{"TRUSTED_PROXY_HOPS", "DATA_KEY_ACTIVE", "SMS_API_URL", "SMS_API_KEY", "KYC_API_URL", "KYC_API_KEY", "GOOGLE_CLIENT_ID", "APPLE_CLIENT_ID"} {
+	for _, k := range []string{"TRUSTED_PROXY_HOPS", "DATA_KEY_ACTIVE", "KYC_API_URL", "KYC_API_KEY", "GOOGLE_CLIENT_ID", "APPLE_CLIENT_ID"} {
 		t.Setenv(k, "")
 	}
 }
 
 func TestAPI_DisabledWhenNoSecretsAreSet(t *testing.T) {
 	t.Setenv("DATABASE_URL", "postgres://x")
-	for _, k := range []string{"OTP_KEY", "TOKEN_SEED", "DATA_KEYS", "IDENTITY_KEY", "VALKEY_ADDR", "TRUSTED_PROXY_HEADER"} {
+	for _, k := range []string{"AUTH_KEY", "TOKEN_SEED", "DATA_KEYS", "IDENTITY_KEY", "VALKEY_ADDR", "TRUSTED_PROXY_HEADER"} {
 		t.Setenv(k, "")
 	}
 	cfg, err := config.Load()
@@ -43,7 +43,7 @@ func TestAPI_EnabledWithEverythingSet(t *testing.T) {
 		t.Fatalf("enabled=%v err=%v", cfg.API.Enabled, err)
 	}
 	a := cfg.API
-	if len(a.OTPKey) != 32 || len(a.TokenSeed) != 32 || len(a.IdentityKey) != 32 || len(a.DataKeys[1]) != 32 || a.DataKeyActive != 1 {
+	if len(a.AuthKey) != 32 || len(a.TokenSeed) != 32 || len(a.IdentityKey) != 32 || len(a.DataKeys[1]) != 32 || a.DataKeyActive != 1 {
 		t.Fatalf("keys not decoded: %+v", a)
 	}
 	if a.TrustedProxyHeader != "X-Forwarded-For" || a.TrustedProxyHops != 1 || a.ValkeyAddr != "valkey:6379" {
@@ -52,7 +52,7 @@ func TestAPI_EnabledWithEverythingSet(t *testing.T) {
 }
 
 func TestAPI_PartialConfigurationIsRefusedAndNamesWhatIsMissing(t *testing.T) {
-	for _, missing := range []string{"OTP_KEY", "TOKEN_SEED", "DATA_KEYS", "IDENTITY_KEY", "VALKEY_ADDR"} {
+	for _, missing := range []string{"AUTH_KEY", "TOKEN_SEED", "DATA_KEYS", "IDENTITY_KEY", "VALKEY_ADDR"} {
 		fullAPIEnv(t)
 		t.Setenv(missing, "")
 		_, err := config.Load()
@@ -88,7 +88,7 @@ func TestAPI_TrustedProxyHeaderMustBeChosenExplicitly(t *testing.T) {
 
 func TestAPI_RejectsMalformedSecrets(t *testing.T) {
 	cases := map[string]string{
-		"OTP_KEY":      b64(8),
+		"AUTH_KEY":     b64(8),
 		"TOKEN_SEED":   b64(16),
 		"IDENTITY_KEY": "not base64!!",
 		"DATA_KEYS":    "1:" + b64(16),
@@ -117,14 +117,14 @@ func TestAPI_RejectsMalformedSecrets(t *testing.T) {
 	}
 }
 
-func TestAPI_GatewayURLsMustBeHTTPSExceptLocalOnes(t *testing.T) {
+func TestAPI_RegistryURLMustBeHTTPSExceptLocalOnes(t *testing.T) {
 	fullAPIEnv(t)
-	t.Setenv("SMS_API_URL", "http://sms.example.com/send")
-	if _, err := config.Load(); err == nil || !strings.Contains(err.Error(), "SMS_API_URL") {
+	t.Setenv("KYC_API_URL", "http://registry.example.com/verify")
+	if _, err := config.Load(); err == nil || !strings.Contains(err.Error(), "KYC_API_URL") {
 		t.Errorf("plain-http public gateway accepted: %v", err)
 	}
-	for _, ok := range []string{"https://sms.example.com/send", "http://sms-mock:8080/send", "http://localhost:8092/send"} {
-		t.Setenv("SMS_API_URL", ok)
+	for _, ok := range []string{"https://registry.example.com/verify", "http://kyc-mock:8080/verify", "http://localhost:8091/verify"} {
+		t.Setenv("KYC_API_URL", ok)
 		if _, err := config.Load(); err != nil {
 			t.Errorf("%s rejected: %v", ok, err)
 		}

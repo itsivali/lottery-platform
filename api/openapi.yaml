@@ -43,42 +43,71 @@ paths:
           content:
             text/plain:
               schema: { type: string }
-  /v1/auth/otp/request:
+  /v1/auth/signup:
     post:
-      operationId: requestOtp
+      operationId: signup
       tags: [auth]
-      summary: Send a sign-in code by SMS
-      description: Always answers 204 for a well-formed number, whether or not an account exists.
+      summary: Create an account with a phone number and password
+      description: |
+        There is no SMS code. The number is only a claim until the player proves they control it with the M-Pesa
+        confirmation of their first top-up, so several people may claim one number; a number that already has a proved
+        owner cannot be claimed (409). Passwords need 8 to 128 characters and must not be common or contain the number.
       security: []
       parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
       requestBody:
         required: true
         content:
           application/json:
-            schema: { $ref: "#/components/schemas/OtpRequest" }
+            schema: { $ref: "#/components/schemas/Credentials" }
       responses:
-        "204": { description: Code sent }
+        "201":
+          description: Account created and signed in
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Tokens" }
         "400": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
         "429": { $ref: "#/components/responses/Problem" }
         "503": { $ref: "#/components/responses/Problem" }
-  /v1/auth/otp/verify:
+  /v1/auth/login:
     post:
-      operationId: verifyOtp
+      operationId: login
       tags: [auth]
-      summary: Exchange a code for tokens (creates the account on first use)
+      summary: Sign in with phone number and password
+      description: Every failure to authenticate is the same 401, so responses do not reveal which numbers have accounts.
       security: []
       parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
       requestBody:
         required: true
         content:
           application/json:
-            schema: { $ref: "#/components/schemas/OtpVerify" }
+            schema: { $ref: "#/components/schemas/Credentials" }
       responses:
         "200":
           description: Signed in
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Tokens" }
+        "400": { $ref: "#/components/responses/Problem" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "429": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+  /v1/auth/password/change:
+    post:
+      operationId: changePassword
+      tags: [auth]
+      summary: Change the password
+      description: Ends every other session of the account.
+      parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PasswordChange" }
+      responses:
+        "204": { description: Password changed }
         "400": { $ref: "#/components/responses/Problem" }
         "401": { $ref: "#/components/responses/Problem" }
         "403": { $ref: "#/components/responses/Problem" }
@@ -292,20 +321,21 @@ components:
         attestation_token:
           type: string
           description: Play Integrity or App Attest token. It is evidence for the server-side verifier, never a verdict.
-    OtpRequest:
+    Credentials:
       type: object
       additionalProperties: false
-      required: [msisdn]
+      required: [msisdn, password, device]
       properties:
         msisdn: { type: string, example: "0712345678" }
-    OtpVerify:
+        password: { type: string, minLength: 8, maxLength: 128 }
+        device: { $ref: "#/components/schemas/Device" }
+    PasswordChange:
       type: object
       additionalProperties: false
-      required: [msisdn, code, device]
+      required: [current_password, new_password]
       properties:
-        msisdn: { type: string }
-        code: { type: string, pattern: "^[0-9]{6}$" }
-        device: { $ref: "#/components/schemas/Device" }
+        current_password: { type: string }
+        new_password: { type: string, minLength: 8, maxLength: 128 }
     Refresh:
       type: object
       additionalProperties: false

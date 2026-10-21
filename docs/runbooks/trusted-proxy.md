@@ -1,6 +1,6 @@
 # Runbook: client IP behind Render's load balancer
 
-Per-IP rate limits (OTP requests, sign-in attempts, refresh, SSO) and anonymous idempotency keys all key on the client
+Per-IP rate limits (sign-up, login, refresh, SSO) and anonymous idempotency keys all key on the client
 address. If that address is wrong, every player shares one limit (too coarse) or a client can mint unlimited addresses
 (spoofable). The API therefore **refuses to start** with its secrets set unless `TRUSTED_PROXY_HEADER` is chosen.
 
@@ -16,17 +16,18 @@ address. If that address is wrong, every player shares one limit (too coarse) or
 
 ## Verify after the first deploy (needs the live service URL)
 
-1. **Spoof resistance.** Send 31 sign-in attempts, each with a different forged leftmost entry:
+1. **Spoof resistance.** The per-IP login budget is 60 attempts an hour. Send 61 attempts for *different* numbers (so the
+   per-number budget does not trip first), each with a different forged leftmost entry:
 
    ```bash
-   for i in $(seq 1 31); do
-     curl -s -o /dev/null -w '%{http_code}\n' -X POST "$URL/v1/auth/otp/verify" \
+   for i in $(seq 1 61); do
+     curl -s -o /dev/null -w '%{http_code}\n' -X POST "$URL/v1/auth/login" \
        -H "Idempotency-Key: probe-$i" -H "X-Forwarded-For: 9.9.9.$i" -H 'Content-Type: application/json' \
-       -d '{"msisdn":"0712345678","code":"000000","device":{"fingerprint":"probe","platform":"android"}}'
+       -d "{\"msisdn\":\"07000000$(printf %02d $i)\",\"password\":\"not a real password\",\"device\":{\"fingerprint\":\"probe\",\"platform\":\"android\"}}"
    done | sort | uniq -c
    ```
 
-   Expected: thirty `401` and a `429` for the last. If all 31 are `401`, the header is being trusted from the client:
+   Expected: sixty `401` and a `429` for the last. If all 61 are `401`, the header is being trusted from the client:
    **stop, set `TRUSTED_PROXY_HEADER=none` or fix the hop count, and do not expose the API.**
 2. **Not over-aggregated.** From a second network (for example a phone on mobile data) repeat 5 attempts. Expected `401`s,
    not `429`s. If you get `429` straight away, all clients share one address: the rightmost entry is a proxy. Check the

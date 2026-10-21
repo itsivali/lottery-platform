@@ -17,7 +17,7 @@ import (
 type API struct {
 	Enabled bool
 
-	OTPKey        []byte          // HMAC key for OTP codes and device fingerprints
+	AuthKey       []byte          // HMAC root key: password pepper and device-fingerprint keys derive from it
 	TokenSeed     []byte          // ed25519 seed for access tokens
 	IdentityKey   []byte          // HMAC key for the one-account-per-national-ID lookup hash
 	DataKeys      map[byte][]byte // key-encryption keys for KYC fields, by id
@@ -29,14 +29,13 @@ type API struct {
 	TrustedProxyHeader string
 	TrustedProxyHops   int
 
-	SMSURL, SMSKey string
 	KYCURL, KYCKey string
 
 	GoogleClientID string
 	AppleClientID  string
 }
 
-var apiSecrets = []string{"OTP_KEY", "TOKEN_SEED", "DATA_KEYS", "IDENTITY_KEY", "VALKEY_ADDR"}
+var apiSecrets = []string{"AUTH_KEY", "TOKEN_SEED", "DATA_KEYS", "IDENTITY_KEY", "VALKEY_ADDR"}
 
 // dataKeysEnv returns the key list. DATA_KEY (one base64 key) is shorthand for "1:<key>" so hosts that can only generate
 // a bare random value can supply it; rotation uses the explicit DATA_KEYS form.
@@ -71,10 +70,10 @@ func loadAPI() (API, error) {
 	}
 
 	a := API{Enabled: true, ValkeyAddr: os.Getenv("VALKEY_ADDR"), TrustedProxyHops: 1,
-		SMSURL: os.Getenv("SMS_API_URL"), SMSKey: os.Getenv("SMS_API_KEY"), KYCURL: os.Getenv("KYC_API_URL"), KYCKey: os.Getenv("KYC_API_KEY"),
+		KYCURL: os.Getenv("KYC_API_URL"), KYCKey: os.Getenv("KYC_API_KEY"),
 		GoogleClientID: os.Getenv("GOOGLE_CLIENT_ID"), AppleClientID: os.Getenv("APPLE_CLIENT_ID")}
 	var err error
-	if a.OTPKey, err = secret("OTP_KEY", 32, false); err != nil {
+	if a.AuthKey, err = secret("AUTH_KEY", 32, false); err != nil {
 		return API{}, err
 	}
 	if a.TokenSeed, err = secret("TOKEN_SEED", 32, true); err != nil {
@@ -101,7 +100,7 @@ func loadAPI() (API, error) {
 		}
 		a.TrustedProxyHops = n
 	}
-	for _, g := range []struct{ name, val string }{{"SMS_API_URL", a.SMSURL}, {"KYC_API_URL", a.KYCURL}} {
+	for _, g := range []struct{ name, val string }{{"KYC_API_URL", a.KYCURL}} {
 		if err := checkGatewayURL(g.name, g.val); err != nil {
 			return API{}, err
 		}

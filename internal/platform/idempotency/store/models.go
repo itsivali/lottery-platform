@@ -5,8 +5,6 @@
 package store
 
 import (
-	"net/netip"
-
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
@@ -149,18 +147,6 @@ type IdentityDevice struct {
 	LastSeenAt         pgtype.Timestamptz
 }
 
-type IdentityPhoneOtp struct {
-	ID         string
-	Msisdn     string
-	Purpose    string
-	CodeHmac   []byte
-	Attempts   int16
-	ExpiresAt  pgtype.Timestamptz
-	ConsumedAt pgtype.Timestamptz
-	Ip         *netip.Addr
-	CreatedAt  pgtype.Timestamptz
-}
-
 type IdentityRefreshToken struct {
 	ID        string
 	SessionID string
@@ -181,16 +167,19 @@ type IdentitySession struct {
 }
 
 type IdentityUser struct {
-	ID              string
-	Msisdn          string
-	NationalIDHash  []byte
-	KycStatus       string
-	Status          string
-	Language        string
-	PayoutMsisdn    *string
-	PayoutHoldUntil pgtype.Timestamptz
-	CreatedAt       pgtype.Timestamptz
-	UpdatedAt       pgtype.Timestamptz
+	ID                string
+	Msisdn            string
+	NationalIDHash    []byte
+	KycStatus         string
+	Status            string
+	Language          string
+	PayoutMsisdn      *string
+	PayoutHoldUntil   pgtype.Timestamptz
+	CreatedAt         pgtype.Timestamptz
+	UpdatedAt         pgtype.Timestamptz
+	PasswordHash      *string
+	PasswordChangedAt pgtype.Timestamptz
+	MsisdnVerifiedAt  pgtype.Timestamptz
 }
 
 type KycKycCheck struct {

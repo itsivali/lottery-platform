@@ -1,35 +1,3 @@
--- name: InsertOTP :exec
-INSERT INTO identity.phone_otps (msisdn, purpose, code_hmac, expires_at, ip, created_at)
-VALUES (sqlc.arg(msisdn), sqlc.arg(purpose), sqlc.arg(code_hmac), sqlc.arg(expires_at), sqlc.narg(ip)::inet, sqlc.arg(created_at));
-
--- name: LatestOTPCreatedAt :one
-SELECT created_at FROM identity.phone_otps
-WHERE msisdn = $1 AND purpose = $2
-ORDER BY created_at DESC LIMIT 1;
-
--- name: LockActiveOTP :one
-SELECT id, code_hmac, attempts FROM identity.phone_otps
-WHERE msisdn = $1 AND purpose = $2 AND consumed_at IS NULL AND expires_at > $3 AND attempts < 5
-ORDER BY created_at DESC LIMIT 1
-FOR UPDATE;
-
--- name: BumpOTPAttempts :exec
-UPDATE identity.phone_otps SET attempts = attempts + 1 WHERE id = $1 AND attempts < 5;
-
--- name: ConsumeOTP :exec
-UPDATE identity.phone_otps SET consumed_at = $2 WHERE id = $1 AND consumed_at IS NULL;
-
--- name: GetUserByMSISDN :one
-SELECT id, kyc_status, status FROM identity.users WHERE msisdn = $1;
-
--- name: InsertUser :one
-INSERT INTO identity.users (msisdn) VALUES ($1)
-ON CONFLICT (msisdn) DO UPDATE SET msisdn = EXCLUDED.msisdn
-RETURNING id, (xmax = 0) AS created;
-
--- name: GetUser :one
-SELECT id, msisdn, kyc_status, status, language FROM identity.users WHERE id = $1;
-
 -- name: UpsertDevice :one
 INSERT INTO identity.devices (user_id, fingerprint_hash, platform, attestation_verdict, first_seen_at, last_seen_at)
 VALUES (sqlc.arg(user_id), sqlc.arg(fingerprint_hash), sqlc.arg(platform), sqlc.arg(attestation_verdict), sqlc.arg(at), sqlc.arg(at))
@@ -72,3 +40,37 @@ SELECT user_id FROM identity.auth_identities WHERE provider = $1 AND subject = $
 SELECT d.platform, d.attestation_verdict
 FROM identity.sessions s JOIN identity.devices d ON d.id = s.device_id
 WHERE s.id = $1;
+
+-- name: InsertAccount :one
+INSERT INTO identity.users (msisdn, password_hash, password_changed_at, created_at, updated_at)
+VALUES (sqlc.arg(msisdn), sqlc.arg(password_hash), sqlc.arg(at), sqlc.arg(at), sqlc.arg(at))
+RETURNING id;
+
+-- name: VerifiedAccountExists :one
+SELECT EXISTS (SELECT 1 FROM identity.users WHERE msisdn = $1 AND msisdn_verified_at IS NOT NULL) ::boolean AS exists;
+
+-- A number with a proved owner admits only that owner; otherwise the newest few unproved claims are tried.
+-- name: LoginCandidates :many
+SELECT id, password_hash, status, (msisdn_verified_at IS NOT NULL)::boolean AS phone_verified
+FROM identity.users
+WHERE msisdn = $1 AND password_hash IS NOT NULL
+ORDER BY (msisdn_verified_at IS NULL), created_at DESC
+LIMIT 5;
+
+-- name: GetUser :one
+SELECT id, msisdn, kyc_status, status, language, password_hash, (msisdn_verified_at IS NOT NULL)::boolean AS phone_verified
+FROM identity.users WHERE id = $1;
+
+-- name: SetPassword :exec
+UPDATE identity.users SET password_hash = $2, password_changed_at = $3, updated_at = $3 WHERE id = $1;
+
+-- name: RevokeOtherSessions :exec
+UPDATE identity.sessions SET revoked_at = sqlc.arg(at), revoked_reason = 'password_change'
+WHERE user_id = sqlc.arg(user_id) AND id <> sqlc.arg(keep_session_id) AND revoked_at IS NULL;
+
+-- name: LockUserPhone :one
+SELECT msisdn, (msisdn_verified_at IS NOT NULL)::boolean AS verified FROM identity.users WHERE id = $1 FOR UPDATE;
+
+-- name: MarkPhoneVerified :exec
+UPDATE identity.users SET msisdn_verified_at = $2, updated_at = $2 WHERE id = $1 AND msisdn_verified_at IS NULL;
+

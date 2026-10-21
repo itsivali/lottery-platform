@@ -41,7 +41,7 @@ func TestRenderBlueprint_ProvidesEveryVariableTheAPIRequires(t *testing.T) {
 	if api == nil {
 		t.Fatal("no web service in render.yaml")
 	}
-	for _, k := range []string{"OTP_KEY", "TOKEN_SEED", "DATA_KEY", "IDENTITY_KEY", "VALKEY_ADDR", "TRUSTED_PROXY_HEADER", "DATABASE_URL"} {
+	for _, k := range []string{"AUTH_KEY", "TOKEN_SEED", "DATA_KEY", "IDENTITY_KEY", "VALKEY_ADDR", "TRUSTED_PROXY_HEADER", "DATABASE_URL"} {
 		if _, ok := api[k]; !ok {
 			t.Errorf("web service does not set %s", k)
 		}

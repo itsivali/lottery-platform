@@ -33,13 +33,6 @@ services:
       MOCK_NAME: kyc-mock
       MOCK_ROUTES: '{"/verify":"{\"found\":true,\"name_match\":true,\"dob_match\":true,\"reference\":\"local\"}"}'
     ports: ["8091:8080"]
-  sms-mock:
-    build: { context: ., target: mock, args: { TARGET: mocks/stub } }
-    # local dev only: read the one-time code with `docker compose logs sms-mock`
-    environment:
-      MOCK_NAME: sms-mock
-      MOCK_ROUTES: '{"/send":"{}"}'
-    ports: ["8092:8080"]
   drand-mock:
     build: { context: ., target: mock, args: { TARGET: mocks/stub } }
     environment: { MOCK_NAME: drand-mock }
@@ -54,14 +47,12 @@ services:
     # Every credential below is a throwaway local value (base64 of ASCII filler). Never reuse them anywhere real.
     environment:
       DATABASE_URL: "postgres://lottery:lottery@postgres:5432/lottery?sslmode=disable"
-      OTP_KEY: bG9jYWwtZGV2LW9ubHktb3RwLWtleS0wMDAwMDAwMDA=
+      AUTH_KEY: bG9jYWwtZGV2LW9ubHktYXV0aC1rZXktMDAwMDAwMDA=
       TOKEN_SEED: bG9jYWwtZGV2LW9ubHktdG9rZW4tc2VlZC0wMDAwMDA=
       DATA_KEY: bG9jYWwtZGV2LW9ubHktZGF0YS1rZXktMDAwMDAwMDA=
       IDENTITY_KEY: bG9jYWwtZGV2LW9ubHktaWQta2V5LTAwMDAwMDAwMDA=
       VALKEY_ADDR: valkey:6379
       TRUSTED_PROXY_HEADER: none
-      SMS_API_URL: http://sms-mock:8080/send
-      SMS_API_KEY: local
       KYC_API_URL: http://kyc-mock:8080/verify
       KYC_API_KEY: local
       WORKERS_IN_PROCESS: "true"
