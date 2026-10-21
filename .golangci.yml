@@ -15,9 +15,13 @@ linters:
       forbid:
         - pattern: '^fmt\.Sprintf$'
           msg: "Never build SQL with fmt.Sprintf; use sqlc queries. If this is not SQL, use string concatenation or strconv."
+        - pattern: '^time\.Now$'
+          msg: "Business time comes from internal/platform/clock (injectable, Postgres now()); never call time.Now()."
   exclusions:
     rules:
       - path: _test\.go
         linters: [gosec, forbidigo]
+      - path: internal/platform/testpg/
+        linters: [forbidigo]
 formatters:
   enable: [gofmt, goimports]
