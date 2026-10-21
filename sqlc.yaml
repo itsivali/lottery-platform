@@ -39,3 +39,17 @@ sql:
         out: internal/audit/store
         sql_package: pgx/v5
         overrides: *overrides
+  - engine: postgresql
+    schema: db/migrations
+    queries: db/queries/identity.sql
+    gen:
+      go:
+        package: store
+        out: internal/identity/store
+        sql_package: pgx/v5
+        overrides:
+          - { db_type: uuid, go_type: string }
+          - { db_type: uuid, nullable: true, go_type: { type: string, pointer: true } }
+          - { db_type: text, nullable: true, go_type: { type: string, pointer: true } }
+          - { db_type: timestamptz, go_type: time.Time }
+          - { db_type: timestamptz, nullable: true, go_type: { type: time.Time, pointer: true } }

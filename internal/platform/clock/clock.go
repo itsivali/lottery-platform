@@ -81,3 +81,33 @@ func (s *Stepped) Now(context.Context, Querier) (time.Time, error) {
 	s.next = s.next.Add(s.step)
 	return t, nil
 }
+
+// Manual is a Clock tests move explicitly with Advance or Set.
+type Manual struct {
+	mu  sync.Mutex
+	now time.Time
+}
+
+// NewManual returns a Manual clock reading at.
+func NewManual(at time.Time) *Manual { return &Manual{now: at} }
+
+// Now implements Clock.
+func (m *Manual) Now(context.Context, Querier) (time.Time, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.now, nil
+}
+
+// Advance moves the clock forward by d.
+func (m *Manual) Advance(d time.Duration) {
+	m.mu.Lock()
+	m.now = m.now.Add(d)
+	m.mu.Unlock()
+}
+
+// Set jumps the clock to at.
+func (m *Manual) Set(at time.Time) {
+	m.mu.Lock()
+	m.now = at
+	m.mu.Unlock()
+}

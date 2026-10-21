@@ -45,3 +45,22 @@ func TestInNairobi_ConvertsWithoutChangingTheInstant(t *testing.T) {
 		t.Fatalf("got %v", got)
 	}
 }
+
+func TestManual_AdvancesOnlyWhenTold(t *testing.T) {
+	start := time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC)
+	c := clock.NewManual(start)
+	a, _ := c.Now(context.Background(), nil)
+	b, _ := c.Now(context.Background(), nil)
+	if !a.Equal(start) || !b.Equal(start) {
+		t.Fatalf("clock moved by itself: %v %v", a, b)
+	}
+	c.Advance(90 * time.Second)
+	d, _ := c.Now(context.Background(), nil)
+	if d.Sub(start) != 90*time.Second {
+		t.Fatalf("after Advance: %v", d)
+	}
+	c.Set(start)
+	if e, _ := c.Now(context.Background(), nil); !e.Equal(start) {
+		t.Fatalf("after Set: %v", e)
+	}
+}
