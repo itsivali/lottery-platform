@@ -15,6 +15,11 @@ CREATE SCHEMA IF NOT EXISTS audit;
 
 -- Roles are cluster-wide and survive a rollback. NOLOGIN: login roles / passwords are provisioned at deploy time
 -- and granted membership in these (never in this repository).
+--
+-- Role separation needs a role allowed to create roles. A managed Postgres (for example Render) gives the
+-- application a database owner that is not a superuser and may not be able to; in that case this block only warns
+-- and the schema runs in single-role mode. The invariants that matter most (append-only, ledger balance, wallet
+-- reconciliation, play cap, one-time draw seed) are triggers and constraints and hold for every role regardless.
 -- +goose StatementBegin
 DO $$
 DECLARE r text;
@@ -24,9 +29,11 @@ BEGIN
       EXECUTE format('CREATE ROLE %I NOLOGIN', r);
     END IF;
   END LOOP;
-  -- the role running migrations must be able to hand ownership to app_migrator
-  EXECUTE format('GRANT app_migrator TO %I', current_user);
-EXCEPTION WHEN duplicate_object OR invalid_grant_operation THEN NULL;
+  -- the migrating role must be able to hand ownership to app_migrator (needs the SET option on PostgreSQL 16+)
+  EXECUTE format('GRANT app_migrator TO %I WITH SET TRUE', current_user);
+  EXECUTE format('GRANT CREATE ON DATABASE %I TO app_migrator', current_database());
+EXCEPTION WHEN insufficient_privilege THEN
+  RAISE WARNING 'cannot create or grant application roles as %: running in SINGLE-ROLE MODE (no privilege separation between api, worker and readonly)', current_user;
 END $$;
 -- +goose StatementEnd
 

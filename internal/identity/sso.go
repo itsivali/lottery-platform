@@ -27,6 +27,7 @@ func (s *Service) SignInSSO(ctx context.Context, provider, idToken, nonce string
 	if err != nil {
 		return Tokens{}, err
 	}
+	verdict := s.verdict(ctx, dev)
 	var tokens Tokens
 	err = s.withTx(ctx, func(_ pgx.Tx, q *store.Queries, now time.Time) error {
 		userID, err := q.FindAuthIdentity(ctx, store.FindAuthIdentityParams{Provider: provider, Subject: sub})
@@ -39,7 +40,7 @@ func (s *Service) SignInSSO(ctx context.Context, provider, idToken, nonce string
 		if err := s.assertActive(ctx, q, userID); err != nil {
 			return err
 		}
-		tokens, err = s.startSession(ctx, q, userID, dev, now)
+		tokens, err = s.startSession(ctx, q, userID, dev, verdict, now)
 		return err
 	})
 	return tokens, err

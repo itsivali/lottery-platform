@@ -25,15 +25,16 @@ const (
 
 // Errors. Handlers map them to HTTP statuses; OTP failures are deliberately indistinguishable to avoid oracles.
 var (
-	ErrOTPInvalid       = errors.New("identity: invalid or expired code")
-	ErrTokenInvalid     = errors.New("identity: invalid token")
-	ErrTokenReuse       = errors.New("identity: refresh token reuse detected")
-	ErrDeviceCap        = errors.New("identity: too many accounts on this device")
-	ErrDeviceRequired   = errors.New("identity: device fingerprint required")
-	ErrAccountSuspended = errors.New("identity: account suspended")
-	ErrSSONotLinked     = errors.New("identity: no account is linked to this identity")
-	ErrSSOAlreadyLinked = errors.New("identity: this identity is already linked")
-	ErrKYCRequired      = errors.New("identity: KYC must be verified first")
+	ErrOTPInvalid        = errors.New("identity: invalid or expired code")
+	ErrTokenInvalid      = errors.New("identity: invalid token")
+	ErrTokenReuse        = errors.New("identity: refresh token reuse detected")
+	ErrDeviceCap         = errors.New("identity: too many accounts on this device")
+	ErrDeviceRequired    = errors.New("identity: device fingerprint required")
+	ErrAccountSuspended  = errors.New("identity: account suspended")
+	ErrSSONotLinked      = errors.New("identity: no account is linked to this identity")
+	ErrSSOAlreadyLinked  = errors.New("identity: this identity is already linked")
+	ErrKYCRequired       = errors.New("identity: KYC must be verified first")
+	ErrAttestationFailed = errors.New("identity: this device failed attestation")
 )
 
 // CooldownError reports that a new OTP cannot be requested yet.
@@ -67,11 +68,26 @@ type Config struct {
 	DeviceCap   int           // accounts allowed per device (DECISION, default 2)
 }
 
-// Device describes the calling device.
+// Device describes the calling device. AttestationToken is the opaque Play Integrity / App Attest token the app
+// obtained; it is only ever an input to the server-side Attestor, never a verdict.
 type Device struct {
-	Fingerprint string
-	Platform    string // android | ios | web
-	Attestation string // none | passed | failed (verified by the caller)
+	Fingerprint      string
+	Platform         string // android | ios | web
+	AttestationToken string
+}
+
+// Attestor verifies a device attestation token server-side (Play Integrity on Android, App Attest on iOS). nonce binds
+// the token to this sign-in. It reports whether the device passed; an error means the verifier could not decide.
+type Attestor interface {
+	Verify(ctx context.Context, platform, token, nonce string) (passed bool, err error)
+}
+
+// UnavailableAttestor is the default until a real verifier is configured: it never passes a device.
+type UnavailableAttestor struct{}
+
+// Verify implements Attestor.
+func (UnavailableAttestor) Verify(context.Context, string, string, string) (bool, error) {
+	return false, errors.New("identity: no attestation verifier configured")
 }
 
 // Tokens are returned on sign-in and refresh.
@@ -91,12 +107,35 @@ type Service struct {
 	sms   SMS
 	oidc  IDTokenVerifier
 	audit *audit.Writer
+	att   Attestor
 	cfg   Config
 }
 
 // NewService returns a Service.
 func NewService(pool *pgxpool.Pool, clk clock.Clock, sms SMS, oidc IDTokenVerifier, a *audit.Writer, cfg Config) *Service {
-	return &Service{pool: pool, clk: clk, sms: sms, oidc: oidc, audit: a, cfg: cfg}
+	return &Service{pool: pool, clk: clk, sms: sms, oidc: oidc, audit: a, att: UnavailableAttestor{}, cfg: cfg}
+}
+
+// WithAttestor installs the device attestation verifier (it must be set before the service handles requests).
+func (s *Service) WithAttestor(a Attestor) *Service {
+	s.att = a
+	return s
+}
+
+// verdict asks the attestor about a mobile device before any transaction is opened. Without a token, on web, or when
+// the verifier cannot decide, the verdict is "none" (unknown), never "passed".
+func (s *Service) verdict(ctx context.Context, dev Device) string {
+	if (dev.Platform != "android" && dev.Platform != "ios") || dev.AttestationToken == "" {
+		return "none"
+	}
+	passed, err := s.att.Verify(ctx, dev.Platform, dev.AttestationToken, dev.Fingerprint)
+	switch {
+	case err != nil:
+		return "none"
+	case passed:
+		return "passed"
+	}
+	return "failed"
 }
 
 func (s *Service) now(ctx context.Context, q clock.Querier) (time.Time, error) {

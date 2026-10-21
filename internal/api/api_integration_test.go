@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/itsivali/lottery-platform/internal/api"
@@ -64,6 +65,34 @@ func (fakeOIDC) VerifyIDToken(_ context.Context, _, token, nonce string) (string
 	return sub, nil
 }
 
+// kycQueue stands in for River: it remembers enqueued checks so a test can run them when it chooses.
+type kycQueue struct {
+	mu      sync.Mutex
+	pending []string
+	process func(context.Context, string) error
+}
+
+func (q *kycQueue) EnqueueVerify(_ context.Context, _ pgx.Tx, checkID, _ string) error {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.pending = append(q.pending, checkID)
+	return nil
+}
+
+// drain runs every queued verification job, as the worker would.
+func (e *env) drainKYC(t *testing.T) {
+	t.Helper()
+	e.enq.mu.Lock()
+	jobs := e.enq.pending
+	e.enq.pending = nil
+	e.enq.mu.Unlock()
+	for _, id := range jobs {
+		if err := e.enq.process(context.Background(), id); err != nil {
+			t.Fatalf("kyc job %s: %v", id, err)
+		}
+	}
+}
+
 type env struct {
 	pool *pgxpool.Pool
 	clk  *clock.Manual
@@ -71,6 +100,7 @@ type env struct {
 	kyc  *kyc.Mock
 	vk   *testvalkey.Server
 	srv  *httptest.Server
+	enq  *kycQueue
 	keys int
 }
 
@@ -86,19 +116,21 @@ func setup(t *testing.T) *env {
 	_, _ = rand.Read(k)
 	kr, _ := crypto.NewKeyring(1, map[byte][]byte{1: k})
 	mock := kyc.NewMock()
+	enq := &kycQueue{}
 	deps := api.Deps{
 		Identity: identity.NewService(pool, clk, sms, fakeOIDC{}, aw, identity.Config{
 			OTPKey: []byte("0123456789abcdef0123456789abcdef"), TokenKey: priv, Issuer: "lottery", Audience: "lottery-api",
 			AccessTTL: 10 * time.Minute, RefreshTTL: 30 * 24 * time.Hour, OTPTTL: 5 * time.Minute, OTPCooldown: time.Minute, DeviceCap: 2,
 		}),
-		KYC:     kyc.NewService(pool, clk, mock, kr, []byte("0123456789abcdef0123456789abcdef"), aw),
+		KYC:     kyc.NewService(pool, clk, mock, kr, []byte("0123456789abcdef0123456789abcdef"), aw, enq),
 		RG:      rg.NewService(pool, clk, aw, rg.Config{CoolingOff: 24 * time.Hour}),
 		Idem:    idempotency.NewStore(pool),
 		Limiter: ratelimit.New(vk.Client(t)),
 	}
 	srv := httptest.NewServer(httpx.NewRouterWith(pool, api.Mount(deps)))
+	enq.process = func(ctx context.Context, id string) error { return deps.KYC.Process(ctx, id) }
 	t.Cleanup(srv.Close)
-	return &env{pool: pool, clk: clk, sms: sms, kyc: mock, vk: vk, srv: srv}
+	return &env{pool: pool, clk: clk, sms: sms, kyc: mock, vk: vk, srv: srv, enq: enq}
 }
 
 type resp struct {
@@ -250,8 +282,12 @@ func TestAPI_PlayersCannotSeeOrChangeEachOthersData(t *testing.T) {
 	e.kyc.Register("12345678", "Jane Wanjiru Kamau", time.Date(1990, 5, 17, 0, 0, 0, 0, time.UTC))
 	a, b := e.signIn(t), e.signIn(t)
 
-	if r := e.do(t, http.MethodPost, "/v1/kyc", a.access, map[string]any{"national_id": "12345678", "full_name": "Jane Wanjiru Kamau", "date_of_birth": "1990-05-17"}); r.Body["status"] != "verified" {
-		t.Fatalf("A KYC: %s", r.Raw)
+	if r := e.do(t, http.MethodPost, "/v1/kyc", a.access, map[string]any{"national_id": "12345678", "full_name": "Jane Wanjiru Kamau", "date_of_birth": "1990-05-17"}); r.Code != http.StatusAccepted || r.Body["status"] != "pending" {
+		t.Fatalf("A KYC submit: %d %s", r.Code, r.Raw)
+	}
+	e.drainKYC(t)
+	if r := e.do(t, http.MethodGet, "/v1/kyc", a.access, nil); r.Body["status"] != "verified" {
+		t.Fatalf("A KYC after the job ran: %s", r.Raw)
 	}
 	e.do(t, http.MethodPut, "/v1/rg/limits", a.access, map[string]any{"period": "daily", "amount_kes": 500})
 	e.do(t, http.MethodPost, "/v1/rg/self-exclusion", a.access, map[string]any{"term": "permanent"})
@@ -380,8 +416,15 @@ func TestAPI_KYCErrorMapping(t *testing.T) {
 	if r := submit(a.access, "22222222", "Young Person", "2015-01-01"); r.Code != 403 {
 		t.Errorf("underage: %d", r.Code)
 	}
-	if r := submit(a.access, "12345678", "Jane Wanjiru Kamau", "1990-05-17"); r.Code != 200 || r.Body["status"] != "verified" {
-		t.Errorf("verify: %d %s", r.Code, r.Raw)
+	if r := submit(a.access, "12345678", "Jane Wanjiru Kamau", "1990-05-17"); r.Code != 202 || r.Body["status"] != "pending" {
+		t.Errorf("accepted for verification: %d %s", r.Code, r.Raw)
+	}
+	if r := submit(a.access, "12345678", "Jane Wanjiru Kamau", "1990-05-17"); r.Code != 409 {
+		t.Errorf("resubmit while pending: %d", r.Code)
+	}
+	e.drainKYC(t)
+	if r := e.do(t, http.MethodGet, "/v1/kyc", a.access, nil); r.Body["status"] != "verified" {
+		t.Errorf("after the job: %s", r.Raw)
 	}
 	if r := submit(a.access, "12345678", "Jane Wanjiru Kamau", "1990-05-17"); r.Code != 409 {
 		t.Errorf("already verified: %d", r.Code)
@@ -389,9 +432,19 @@ func TestAPI_KYCErrorMapping(t *testing.T) {
 	if r := submit(b.access, "12345678", "Jane Wanjiru Kamau", "1990-05-17"); r.Code != 409 {
 		t.Errorf("duplicate id: %d", r.Code)
 	}
+	// a registry outage never fails the request: the submission stays pending and the queue retries
 	e.kyc.FailNext(errors.New("down"))
-	if r := submit(b.access, "33333333", "Some Body", "1990-01-01"); r.Code != 503 || r.Header.Get("Retry-After") == "" {
-		t.Errorf("provider outage: %d", r.Code)
+	if r := submit(b.access, "33333333", "Some Body", "1990-01-01"); r.Code != 202 {
+		t.Errorf("submission during an outage: %d", r.Code)
+	}
+	e.enq.mu.Lock()
+	pending := e.enq.pending[0]
+	e.enq.mu.Unlock()
+	if err := e.enq.process(context.Background(), pending); err == nil {
+		t.Error("the job should report the outage so it is retried")
+	}
+	if r := e.do(t, http.MethodGet, "/v1/kyc", b.access, nil); r.Body["status"] != "pending" {
+		t.Errorf("status during the outage: %s", r.Raw)
 	}
 }
 

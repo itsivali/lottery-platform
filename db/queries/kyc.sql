@@ -23,3 +23,7 @@ WHERE user_id = $1 ORDER BY created_at DESC, id DESC LIMIT 1;
 
 -- name: GetUserKYCStatus :one
 SELECT kyc_status FROM identity.users WHERE id = $1;
+
+-- name: GetKYCCheck :one
+SELECT id, user_id, status, id_number_enc, id_number_hash, full_name_enc, date_of_birth_enc, provider, supersedes_id
+FROM kyc.kyc_checks WHERE id = $1;

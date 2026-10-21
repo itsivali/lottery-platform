@@ -84,3 +84,33 @@ func TestClientIP(t *testing.T) {
 		}
 	}
 }
+
+func TestClientIPHops_PicksTheNthEntryFromTheRight(t *testing.T) {
+	mk := func(xff string) *http.Request {
+		r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", nil)
+		r.RemoteAddr = "10.0.0.1:1"
+		if xff != "" {
+			r.Header.Set("X-Forwarded-For", xff)
+		}
+		return r
+	}
+	cases := []struct {
+		name string
+		xff  string
+		hops int
+		want string
+	}{
+		{"one trusted proxy: the entry it appended", "6.6.6.6, 203.0.113.9", 1, "203.0.113.9"},
+		{"two trusted proxies (CDN + load balancer)", "6.6.6.6, 203.0.113.9, 10.1.1.1", 2, "203.0.113.9"},
+		{"client-supplied spoof entries are never reached", "1.1.1.1, 2.2.2.2, 203.0.113.9, 10.1.1.1", 2, "203.0.113.9"},
+		{"fewer entries than hops: do not guess, use the socket", "203.0.113.9", 2, "10.0.0.1"},
+		{"hops below 1 behaves as 1", "6.6.6.6, 203.0.113.9", 0, "203.0.113.9"},
+		{"unparseable entry falls back to the socket", "6.6.6.6, garbage", 1, "10.0.0.1"},
+		{"header absent", "", 1, "10.0.0.1"},
+	}
+	for _, c := range cases {
+		if got := httpx.ClientIPHops(mk(c.xff), "X-Forwarded-For", c.hops); got != c.want {
+			t.Errorf("%s: got %q, want %q", c.name, got, c.want)
+		}
+	}
+}

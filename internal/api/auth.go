@@ -12,14 +12,15 @@ import (
 )
 
 type deviceJSON struct {
-	Fingerprint string `json:"fingerprint"`
-	Platform    string `json:"platform"`
+	Fingerprint      string `json:"fingerprint"`
+	Platform         string `json:"platform"`
+	AttestationToken string `json:"attestation_token"`
 }
 
-// toDevice converts the client's device description. The client's own attestation claim is never trusted: until the
-// Play Integrity / App Attest verifier is wired in (phase 7) every device is recorded as unattested.
+// toDevice converts the client's device description. The attestation token is only evidence for the server-side
+// verifier; there is no way for a client to state a verdict.
 func (d deviceJSON) toDevice() identity.Device {
-	return identity.Device{Fingerprint: d.Fingerprint, Platform: d.Platform, Attestation: "none"}
+	return identity.Device{Fingerprint: d.Fingerprint, Platform: d.Platform, AttestationToken: d.AttestationToken}
 }
 
 type tokensJSON struct {

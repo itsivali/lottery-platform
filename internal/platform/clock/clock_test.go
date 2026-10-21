@@ -64,3 +64,18 @@ func TestManual_AdvancesOnlyWhenTold(t *testing.T) {
 		t.Fatalf("after Set: %v", e)
 	}
 }
+
+func TestWall_NeedsNoDatabaseAndTracksRealTime(t *testing.T) {
+	before := time.Now() //nolint:forbidigo // test oracle for the wall clock
+	got, err := clock.Wall{}.Now(context.Background(), nil)
+	after := time.Now() //nolint:forbidigo // test oracle for the wall clock
+	if err != nil || got.Before(before) || got.After(after) {
+		t.Fatalf("Wall.Now = %v, %v; want between %v and %v", got, err, before, after)
+	}
+}
+
+func TestPostgres_WithoutAQuerierFailsInsteadOfPanicking(t *testing.T) {
+	if _, err := (clock.Postgres{}).Now(context.Background(), nil); err == nil {
+		t.Fatal("nil querier accepted")
+	}
+}

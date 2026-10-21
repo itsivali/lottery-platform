@@ -104,3 +104,39 @@ Device-to-account cap 2, deposit-limit cooling-off 24 h, OTP expiry 5 min / 5 at
 10 min, refresh token 30 days (placeholder), idempotency key lifetime 24 h (placeholder). No tax rates were invented:
 with no `tax_rules` version in force the store returns `ErrNoTaxRule`. `TRUSTED_PROXY_HEADER` (the header Render's load
 balancer sets) must be configured before the API is exposed, or per-IP limits would key on the balancer's address.
+
+
+## Addendum: deployment wiring and hardening (after the phase 1 review)
+
+Closed the items deferred above:
+
+- **/v1 is wired into `cmd/api`** through `internal/app`, which both `cmd/api` and the new `cmd/worker` use. It is all-or-nothing:
+  none of the API secrets set means health probes only; some but not all set means the process refuses to start and
+  names what is missing. `TestApp_FullJourneyThroughTheRealWiring` runs SMS, OTP sign-in, KYC submission and worker
+  verification through the real wiring; `make e2e` does the same against the compose stack (SMS and registry mocks).
+  Anything unconfigured fails closed (no SMS gateway: OTP unavailable; no registry: KYC retries then abandons; no
+  client id: SSO refused).
+- **KYC is a River job.** `Submit` stores an encrypted `pending` check, marks the account `pending` and enqueues the job in
+  the same transaction; `Process` verifies with the registry; a provider outage retries with backoff and, after the last
+  attempt, `Abandon` frees the player to resubmit. Personal data never enters the job table. The API now answers
+  `202 {"status":"pending"}` and the app polls `GET /v1/kyc`. River's tables live in the `river` schema.
+- **Database roles on a managed Postgres.** Verified by running the migrations as a non-superuser, with and without
+  `CREATEROLE`: the original migrations would have **failed** on Render. They now create roles when allowed (using
+  `GRANT ... WITH SET TRUE`, required on PostgreSQL 16+) and otherwise run in a warned single-role mode where every
+  trigger and constraint still holds. What could not be verified from here is which of the two the real Render user
+  gets: `docs/runbooks/database-roles.md` has the two queries to run.
+- **Trusted proxy.** `TRUSTED_PROXY_HEADER` is mandatory once the API is enabled; for `X-Forwarded-For` the client is the
+  N-th entry from the right (`TRUSTED_PROXY_HOPS`), so client-invented entries are never used. Render does not document
+  its behaviour, so the Blueprint uses the safe default (rightmost entry) and `docs/runbooks/trusted-proxy.md` has the
+  two post-deploy probes that must be run before the API is exposed.
+- **Attestation.** The client sends only an opaque token; a server-side `Attestor` decides the verdict (stored per device),
+  `AssertDeviceTrusted` refuses failed devices (and unattested ones in strict mode) and the default verifier never
+  passes anyone. The real Play Integrity / App Attest verifiers need Google and Apple credentials and real devices and
+  are not built: until then every mobile device is `none`, and strict mode must stay off.
+- **Render Blueprint:** free Postgres + free Key Value + one web service that migrates on start (advisory-locked) and runs
+  workers in-process; generated secrets; vendor keys `sync: false`. A test keeps `render.yaml` in step with the config.
+- Fixed along the way: the OIDC verifier would have panicked on the first Google/Apple sign-in (database clock with no
+  database); compose's Postgres healthcheck passed against the init-time server and made migrations flaky; `Wall` clock added.
+
+Still open: mutation testing (`gremlins` could not be installed here because the module proxy timed out; see
+`docs/runbooks` once run), real SMS / registry vendors, and the production verification of the two Render behaviours above.

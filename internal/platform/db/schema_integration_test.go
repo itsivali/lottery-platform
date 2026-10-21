@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/itsivali/lottery-platform/internal/platform/clock"
+	"github.com/itsivali/lottery-platform/internal/platform/db"
 	"github.com/itsivali/lottery-platform/internal/platform/testpg"
 )
 
@@ -423,5 +424,52 @@ func TestPostgresClock_IsStableInsideATransaction(t *testing.T) {
 	b, _ := cl.Now(ctx, tx)
 	if !a.Equal(b) {
 		t.Fatalf("clock moved inside a transaction: %v then %v", a, b)
+	}
+}
+
+func TestRiver_TablesExistInTheirOwnSchemaAndTheApiCanEnqueue(t *testing.T) {
+	ctx, c := connect(t)
+	var n int
+	if err := c.QueryRow(ctx, `SELECT count(*) FROM information_schema.tables WHERE table_schema = 'river' AND table_name IN ('river_job','river_leader','river_migration')`).Scan(&n); err != nil || n != 3 {
+		t.Fatalf("river tables: %d, %v", n, err)
+	}
+	mustExec(t, ctx, c, "SET ROLE app_api")
+	_, err := c.Exec(ctx, `INSERT INTO river.river_job (kind, args, queue, state, max_attempts, priority) VALUES ('probe','{}','default','available',3,1)`)
+	mustExec(t, ctx, c, "RESET ROLE")
+	if err != nil {
+		t.Fatalf("app_api cannot enqueue: %v", err)
+	}
+	mustExec(t, ctx, c, "SET ROLE app_readonly")
+	_, err = c.Exec(ctx, `DELETE FROM river.river_job`)
+	mustExec(t, ctx, c, "RESET ROLE")
+	if sqlState(err) != codeInsufficientPriv {
+		t.Fatalf("readonly delete on river_job = %v, want permission denied", err)
+	}
+}
+
+func TestMigrateUpExclusive_ConcurrentStartersAllSucceedAndMigrateOnce(t *testing.T) {
+	dsn, _ := testpg.Start(t) // a fresh, unmigrated database
+	ctx := context.Background()
+	const n = 4
+	errs := make(chan error, n)
+	for range n {
+		go func() { errs <- db.MigrateUpExclusive(ctx, dsn) }()
+	}
+	for range n {
+		if err := <-errs; err != nil {
+			t.Fatalf("concurrent migrate: %v", err)
+		}
+	}
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close(ctx) }()
+	var versions, distinct int
+	if err := conn.QueryRow(ctx, `SELECT count(*), count(DISTINCT version_id) FROM goose_db_version WHERE version_id > 0`).Scan(&versions, &distinct); err != nil {
+		t.Fatal(err)
+	}
+	if versions != distinct || versions < 13 {
+		t.Fatalf("%d version rows, %d distinct: a migration ran twice or not at all", versions, distinct)
 	}
 }

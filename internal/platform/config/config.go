@@ -14,6 +14,13 @@ type Config struct {
 	OTLPEndpoint string
 	// MetricsAddr is the internal Prometheus listener; empty disables it. Never the public port.
 	MetricsAddr string
+	// WorkersInProcess runs the background job workers inside the api process (single-service deployments such as the
+	// Render free plan). A dedicated worker process (cmd/worker) is preferred when it can be afforded.
+	WorkersInProcess bool
+	// MigrateOnStart applies pending migrations when the api starts (for hosts without a pre-deploy command).
+	MigrateOnStart bool
+	// API configures the public /v1 API (disabled unless its secrets are present).
+	API API
 }
 
 // Load reads configuration from environment variables.
@@ -33,12 +40,19 @@ func Load() (Config, error) {
 		OTLPEndpoint: os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"),
 		MetricsAddr:  getenv("METRICS_ADDR", "127.0.0.1:9464"),
 	}
+	cfg.WorkersInProcess = os.Getenv("WORKERS_IN_PROCESS") == "true"
+	cfg.MigrateOnStart = os.Getenv("MIGRATE_ON_START") == "true"
 	if cfg.MetricsAddr == "off" {
 		cfg.MetricsAddr = ""
 	}
 	if cfg.DatabaseURL == "" {
 		return Config{}, errors.New("config: DATABASE_URL is required")
 	}
+	api, err := loadAPI()
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.API = api
 	return cfg, nil
 }
 

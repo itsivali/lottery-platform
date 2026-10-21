@@ -7,6 +7,7 @@ package clock
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"time"
 
@@ -45,6 +46,9 @@ type Postgres struct{}
 
 // Now implements Clock.
 func (Postgres) Now(ctx context.Context, q Querier) (time.Time, error) {
+	if q == nil {
+		return time.Time{}, errors.New("clock: Postgres clock needs a database querier (use Wall outside the database)")
+	}
 	var t time.Time
 	if err := q.QueryRow(ctx, "SELECT now()").Scan(&t); err != nil {
 		return time.Time{}, err
@@ -110,4 +114,13 @@ func (m *Manual) Set(at time.Time) {
 	m.mu.Lock()
 	m.now = at
 	m.mu.Unlock()
+}
+
+// Wall is the system clock, for code that has no database to ask (validating third-party tokens, for example). It must
+// not be used for business decisions such as play dates or cutoffs; those use Postgres.
+type Wall struct{}
+
+// Now implements Clock.
+func (Wall) Now(context.Context, Querier) (time.Time, error) {
+	return time.Now(), nil //nolint:forbidigo // the one sanctioned wall-clock read
 }

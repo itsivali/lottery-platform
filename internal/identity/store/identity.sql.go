@@ -93,6 +93,24 @@ func (q *Queries) GetSession(ctx context.Context, id string) (GetSessionRow, err
 	return i, err
 }
 
+const getSessionDevice = `-- name: GetSessionDevice :one
+SELECT d.platform, d.attestation_verdict
+FROM identity.sessions s JOIN identity.devices d ON d.id = s.device_id
+WHERE s.id = $1
+`
+
+type GetSessionDeviceRow struct {
+	Platform           string
+	AttestationVerdict string
+}
+
+func (q *Queries) GetSessionDevice(ctx context.Context, id string) (GetSessionDeviceRow, error) {
+	row := q.db.QueryRow(ctx, getSessionDevice, id)
+	var i GetSessionDeviceRow
+	err := row.Scan(&i.Platform, &i.AttestationVerdict)
+	return i, err
+}
+
 const getUser = `-- name: GetUser :one
 SELECT id, msisdn, kyc_status, status, language FROM identity.users WHERE id = $1
 `

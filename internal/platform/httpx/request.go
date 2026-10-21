@@ -42,15 +42,25 @@ func DecodeJSON(w http.ResponseWriter, r *http.Request, v any) bool {
 	return true
 }
 
-// ClientIP returns the caller's address. trustedHeader names the header set by our own load balancer (for example
-// "True-Client-IP", or "X-Forwarded-For" whose rightmost entry the proxy appended); it is empty when not behind a
-// proxy, in which case headers are ignored entirely so a client cannot spoof its address.
-func ClientIP(r *http.Request, trustedHeader string) string {
+// ClientIP is ClientIPHops with a single trusted proxy.
+func ClientIP(r *http.Request, trustedHeader string) string { return ClientIPHops(r, trustedHeader, 1) }
+
+// ClientIPHops returns the caller's address. trustedHeader names the header set by our own proxy chain (for example
+// "True-Client-IP", or "X-Forwarded-For"); it is empty when not behind a proxy, in which case headers are ignored
+// entirely so a client cannot spoof its address. For X-Forwarded-For, hops is the number of trusted proxies that each
+// appended one entry: the client is the hops-th entry from the right, so entries the client invented on the left are
+// never used. If the chain is shorter than hops or the entry is not an address, the socket address is used.
+func ClientIPHops(r *http.Request, trustedHeader string, hops int) string {
 	if trustedHeader != "" {
 		v := r.Header.Get(trustedHeader)
 		if strings.EqualFold(trustedHeader, "X-Forwarded-For") {
+			hops = max(hops, 1)
 			parts := strings.Split(v, ",")
-			v = parts[len(parts)-1]
+			if len(parts) >= hops {
+				v = parts[len(parts)-hops]
+			} else {
+				v = ""
+			}
 		}
 		if a, err := netip.ParseAddr(strings.TrimSpace(v)); err == nil {
 			return a.String()

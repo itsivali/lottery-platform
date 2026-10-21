@@ -1,0 +1,11 @@
+title = "lottery-platform gitleaks config"
+
+[extend]
+useDefault = true
+
+# The local Docker Compose stack uses throwaway credentials whose plaintext starts with "local-dev-" (base64 prefix
+# below). Singular [allowlist] because CI's gitleaks action (8.24) predates [[allowlists]]. Only secrets with that exact prefix are ignored, so a real key pasted into docker-compose.yml is still caught.
+[allowlist]
+description = "throwaway local-development credentials (plaintext starts with 'local-dev-')"
+regexTarget = "secret"
+regexes = ['''^bG9jYWwtZGV2LW''']

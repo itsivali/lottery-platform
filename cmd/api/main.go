@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/itsivali/lottery-platform/internal/app"
 	"github.com/itsivali/lottery-platform/internal/platform/config"
 	"github.com/itsivali/lottery-platform/internal/platform/db"
 	"github.com/itsivali/lottery-platform/internal/platform/httpx"
@@ -33,11 +34,31 @@ func run(log *slog.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	if cfg.MigrateOnStart {
+		log.Info("applying migrations")
+		if err := db.MigrateUpExclusive(ctx, cfg.DatabaseURL); err != nil {
+			return err
+		}
+	}
 	pool, err := db.Open(ctx, cfg.DatabaseURL)
 	if err != nil {
 		return err
 	}
 	defer pool.Close()
+
+	application, err := app.New(ctx, cfg, pool)
+	if err != nil {
+		return err
+	}
+	defer application.Close(context.Background())
+	if application.Mount == nil {
+		log.Warn("v1 API not configured: serving health probes only (set OTP_KEY, TOKEN_SEED, DATA_KEY(S), IDENTITY_KEY, VALKEY_ADDR and TRUSTED_PROXY_HEADER to enable it)")
+	}
+	if cfg.WorkersInProcess {
+		if err := application.StartWorkers(ctx); err != nil {
+			return err
+		}
+	}
 
 	tel, err := telemetry.New(ctx, telemetry.Config{ServiceName: "lottery-api", OTLPEndpoint: cfg.OTLPEndpoint})
 	if err != nil {
@@ -50,7 +71,7 @@ func run(log *slog.Logger) error {
 
 	srv := &http.Server{
 		Addr:              cfg.HTTPAddr,
-		Handler:           tel.Middleware(httpx.NewRouter(pool)),
+		Handler:           tel.Middleware(httpx.NewRouterWith(pool, application.Mount)),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	errc := make(chan error, 1)

@@ -6,7 +6,7 @@ services:
     environment: { POSTGRES_USER: lottery, POSTGRES_PASSWORD: lottery, POSTGRES_DB: lottery }
     ports: ["${POSTGRES_PORT:-5433}:5432"]
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U lottery"]
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U lottery"]
       interval: 3s
       timeout: 3s
       retries: 20
@@ -28,11 +28,17 @@ services:
     ports: ["8090:8080"]
   kyc-mock:
     build: { context: ., target: mock, args: { TARGET: mocks/stub } }
-    environment: { MOCK_NAME: kyc-mock }
+    # local dev only: every ID verifies. Real fault-injecting mocks arrive with the phases that need them.
+    environment:
+      MOCK_NAME: kyc-mock
+      MOCK_ROUTES: '{"/verify":"{\"found\":true,\"name_match\":true,\"dob_match\":true,\"reference\":\"local\"}"}'
     ports: ["8091:8080"]
   sms-mock:
     build: { context: ., target: mock, args: { TARGET: mocks/stub } }
-    environment: { MOCK_NAME: sms-mock }
+    # local dev only: read the one-time code with `docker compose logs sms-mock`
+    environment:
+      MOCK_NAME: sms-mock
+      MOCK_ROUTES: '{"/send":"{}"}'
     ports: ["8092:8080"]
   drand-mock:
     build: { context: ., target: mock, args: { TARGET: mocks/stub } }
@@ -45,6 +51,21 @@ services:
     depends_on: { postgres: { condition: service_healthy } }
   api:
     build: { context: ., target: api, args: { TARGET: cmd/api } }
-    environment: { DATABASE_URL: "postgres://lottery:lottery@postgres:5432/lottery?sslmode=disable" }
+    # Every credential below is a throwaway local value (base64 of ASCII filler). Never reuse them anywhere real.
+    environment:
+      DATABASE_URL: "postgres://lottery:lottery@postgres:5432/lottery?sslmode=disable"
+      OTP_KEY: bG9jYWwtZGV2LW9ubHktb3RwLWtleS0wMDAwMDAwMDA=
+      TOKEN_SEED: bG9jYWwtZGV2LW9ubHktdG9rZW4tc2VlZC0wMDAwMDA=
+      DATA_KEY: bG9jYWwtZGV2LW9ubHktZGF0YS1rZXktMDAwMDAwMDA=
+      IDENTITY_KEY: bG9jYWwtZGV2LW9ubHktaWQta2V5LTAwMDAwMDAwMDA=
+      VALKEY_ADDR: valkey:6379
+      TRUSTED_PROXY_HEADER: none
+      SMS_API_URL: http://sms-mock:8080/send
+      SMS_API_KEY: local
+      KYC_API_URL: http://kyc-mock:8080/verify
+      KYC_API_KEY: local
+      WORKERS_IN_PROCESS: "true"
     ports: ["8080:8080"]
-    depends_on: { migrate: { condition: service_completed_successfully } }
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      valkey: { condition: service_healthy }

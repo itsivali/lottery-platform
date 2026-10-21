@@ -39,7 +39,8 @@ func (h *handlers) kycSubmit(w http.ResponseWriter, r *http.Request) {
 	st, err := h.KYC.Submit(r.Context(), p.UserID, kyc.Submission{IDNumber: in.NationalID, FullName: in.FullName, DateOfBirth: in.DateOfBirth})
 	switch {
 	case err == nil:
-		httpx.WriteJSON(w, http.StatusOK, map[string]string{"status": string(st)})
+		// verification runs as a background job; the app polls GET /v1/kyc
+		httpx.WriteJSON(w, http.StatusAccepted, map[string]string{"status": string(st)})
 	case errors.Is(err, kyc.ErrInvalidInput):
 		httpx.WriteProblem(w, http.StatusBadRequest, "invalid-kyc-input", "Invalid identity details", "check the ID number, name and date of birth")
 	case errors.Is(err, kyc.ErrUnderage):
@@ -48,8 +49,6 @@ func (h *handlers) kycSubmit(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteProblem(w, http.StatusConflict, "id-already-registered", "This ID cannot be used", "contact support if you believe this is a mistake")
 	case errors.Is(err, kyc.ErrAlreadyVerified), errors.Is(err, kyc.ErrInReview):
 		httpx.WriteProblem(w, http.StatusConflict, "kyc-state", "Verification already submitted", err.Error())
-	case errors.Is(err, kyc.ErrProviderUnavailable):
-		httpx.WriteProblemRetry(w, http.StatusServiceUnavailable, "kyc-unavailable", "Verification temporarily unavailable", "", 30)
 	default:
 		internalError(w, err)
 	}

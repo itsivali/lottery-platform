@@ -67,3 +67,8 @@ INSERT INTO identity.auth_identities (user_id, provider, subject) VALUES ($1, $2
 
 -- name: FindAuthIdentity :one
 SELECT user_id FROM identity.auth_identities WHERE provider = $1 AND subject = $2;
+
+-- name: GetSessionDevice :one
+SELECT d.platform, d.attestation_verdict
+FROM identity.sessions s JOIN identity.devices d ON d.id = s.device_id
+WHERE s.id = $1;

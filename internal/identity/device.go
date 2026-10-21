@@ -13,7 +13,7 @@ func (s *Service) fingerprintHash(fp string) []byte { return crypto.MAC(s.cfg.OT
 
 // registerDevice records the device and enforces the device-to-account cap. Mobile platforms must send a
 // fingerprint; the web has none and is limited by IP and CAPTCHA instead.
-func (s *Service) registerDevice(ctx context.Context, q *store.Queries, userID string, dev Device, now time.Time) (*string, error) {
+func (s *Service) registerDevice(ctx context.Context, q *store.Queries, userID string, dev Device, verdict string, now time.Time) (*string, error) {
 	switch dev.Platform {
 	case "android", "ios":
 		if dev.Fingerprint == "" {
@@ -25,10 +25,6 @@ func (s *Service) registerDevice(ctx context.Context, q *store.Queries, userID s
 		}
 	default:
 		return nil, ErrDeviceRequired
-	}
-	verdict := dev.Attestation
-	if verdict != "passed" && verdict != "failed" {
-		verdict = "none"
 	}
 	hash := s.fingerprintHash(dev.Fingerprint)
 	others, err := q.CountOtherAccountsOnDevice(ctx, store.CountOtherAccountsOnDeviceParams{FingerprintHash: hash, UserID: userID})

@@ -114,3 +114,16 @@ func Pool(t *testing.T, role string) *pgxpool.Pool {
 	t.Cleanup(pool.Close)
 	return pool
 }
+
+// WithDatabase returns dsn pointed at another database name.
+func WithDatabase(dsn, name string) string { return withDB(dsn, name) }
+
+// WithUser returns dsn with different credentials.
+func WithUser(dsn, user, password string) string {
+	u, err := url.Parse(dsn)
+	if err != nil {
+		panic(err)
+	}
+	u.User = url.UserPassword(user, password)
+	return u.String()
+}

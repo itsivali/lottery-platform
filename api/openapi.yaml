@@ -178,8 +178,10 @@ paths:
           application/json:
             schema: { $ref: "#/components/schemas/KycSubmission" }
       responses:
-        "200":
-          description: Verification outcome (`verified` or `manual_review`)
+        "202":
+          description: |
+            Accepted; verification runs in the background and the status is `pending`. Poll `GET /v1/kyc` for
+            `verified`, `manual_review` or `rejected`. A registry outage only delays the result.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/KycStatus" }
@@ -187,7 +189,6 @@ paths:
         "401": { $ref: "#/components/responses/Problem" }
         "403": { $ref: "#/components/responses/Problem" }
         "409": { $ref: "#/components/responses/Problem" }
-        "503": { $ref: "#/components/responses/Problem" }
   /v1/rg/limits:
     get:
       operationId: getLimits
@@ -288,6 +289,9 @@ components:
       properties:
         fingerprint: { type: string, description: Required on android and ios. }
         platform: { type: string, enum: [android, ios, web] }
+        attestation_token:
+          type: string
+          description: Play Integrity or App Attest token. It is evidence for the server-side verifier, never a verdict.
     OtpRequest:
       type: object
       additionalProperties: false

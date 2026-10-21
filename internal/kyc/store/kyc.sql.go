@@ -12,6 +12,40 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const getKYCCheck = `-- name: GetKYCCheck :one
+SELECT id, user_id, status, id_number_enc, id_number_hash, full_name_enc, date_of_birth_enc, provider, supersedes_id
+FROM kyc.kyc_checks WHERE id = $1
+`
+
+type GetKYCCheckRow struct {
+	ID             string
+	UserID         string
+	Status         string
+	IDNumberEnc    []byte
+	IDNumberHash   []byte
+	FullNameEnc    []byte
+	DateOfBirthEnc []byte
+	Provider       string
+	SupersedesID   *string
+}
+
+func (q *Queries) GetKYCCheck(ctx context.Context, id string) (GetKYCCheckRow, error) {
+	row := q.db.QueryRow(ctx, getKYCCheck, id)
+	var i GetKYCCheckRow
+	err := row.Scan(
+		&i.ID,
+		&i.UserID,
+		&i.Status,
+		&i.IDNumberEnc,
+		&i.IDNumberHash,
+		&i.FullNameEnc,
+		&i.DateOfBirthEnc,
+		&i.Provider,
+		&i.SupersedesID,
+	)
+	return i, err
+}
+
 const getUserKYCStatus = `-- name: GetUserKYCStatus :one
 SELECT kyc_status FROM identity.users WHERE id = $1
 `

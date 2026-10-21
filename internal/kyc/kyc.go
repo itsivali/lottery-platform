@@ -77,6 +77,12 @@ var (
 	namePattern = regexp.MustCompile(`^\p{L}[\p{L} .'-]{1,99}$`)
 )
 
+// Enqueuer schedules the verification job for a stored submission. It must enqueue using the caller's transaction so
+// that the submission and its job commit or roll back together (invariant 9).
+type Enqueuer interface {
+	EnqueueVerify(ctx context.Context, tx pgx.Tx, checkID, userID string) error
+}
+
 // Service runs KYC.
 type Service struct {
 	pool  *pgxpool.Pool
@@ -85,11 +91,12 @@ type Service struct {
 	kr    *crypto.Keyring
 	idKey []byte
 	audit *audit.Writer
+	enq   Enqueuer
 }
 
 // NewService returns a Service. idKey keys the lookup hash that enforces one account per national ID.
-func NewService(pool *pgxpool.Pool, clk clock.Clock, prov Provider, kr *crypto.Keyring, idKey []byte, a *audit.Writer) *Service {
-	return &Service{pool: pool, clk: clk, prov: prov, kr: kr, idKey: idKey, audit: a}
+func NewService(pool *pgxpool.Pool, clk clock.Clock, prov Provider, kr *crypto.Keyring, idKey []byte, a *audit.Writer, enq Enqueuer) *Service {
+	return &Service{pool: pool, clk: clk, prov: prov, kr: kr, idKey: idKey, audit: a, enq: enq}
 }
 
 func (s *Service) idHash(id string) []byte { return crypto.MAC(s.idKey, "national-id", id) }
@@ -148,48 +155,145 @@ func (s *Service) Submit(ctx context.Context, userID string, in Submission) (Sta
 		return "", err
 	}
 
-	res, perr := s.prov.Verify(ctx, Request{IDNumber: in.IDNumber, FullName: name, DateOfBirth: dob})
 	rec, err := s.encrypt(in.IDNumber, name, in.DateOfBirth)
 	if err != nil {
 		return "", err
 	}
-	rec.hash = hash
-	rec.adult = true
-	rec.provider = s.prov.Name()
+	rec.hash, rec.adult, rec.provider, rec.status = hash, true, s.prov.Name(), "pending"
 
-	var outcome Status
-	var outErr error
 	err = pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
 		q := store.New(tx)
-		if _, err := q.LockUserKYC(ctx, userID); err != nil {
+		cur, err := q.LockUserKYC(ctx, userID)
+		if err != nil {
 			return err
 		}
-		if perr != nil {
-			rec.status = "error"
-			_, err := insertCheck(ctx, q, userID, nil, rec, now)
-			outErr = ErrProviderUnavailable
+		switch Status(cur.KycStatus) {
+		case Verified:
+			return ErrAlreadyVerified
+		case ManualReview, Pending:
+			return ErrInReview
+		}
+		id, err := insertCheck(ctx, q, userID, nil, rec, now)
+		if err != nil {
 			return err
 		}
-		rec.providerRef = res.Ref
-		rec.nameMatch, rec.dobMatch = &res.NameMatch, &res.DOBMatch
-		var hashToSet []byte
-		if res.Found && res.NameMatch && res.DOBMatch {
-			outcome, rec.status, hashToSet = Verified, "verified", hash
-		} else {
-			outcome, rec.status = ManualReview, "manual_review"
-		}
-		if _, err := insertCheck(ctx, q, userID, nil, rec, now); err != nil {
+		if err := q.SetUserKYC(ctx, store.SetUserKYCParams{KycStatus: string(Pending), At: now, ID: userID}); err != nil {
 			return err
 		}
-		if err := q.SetUserKYC(ctx, store.SetUserKYCParams{KycStatus: string(outcome), NationalIDHash: hashToSet, At: now, ID: userID}); err != nil {
-			return mapUnique(err)
-		}
-		return nil
+		return s.enq.EnqueueVerify(ctx, tx, id, userID)
 	})
 	if err != nil {
 		return "", err
 	}
-	return outcome, outErr
+	return Pending, nil
+}
+
+// pendingCheck loads a check and reports whether it is still the live pending submission of its user.
+func (s *Service) pendingCheck(ctx context.Context, q *store.Queries, checkID string) (store.GetKYCCheckRow, bool, error) {
+	chk, err := q.GetKYCCheck(ctx, checkID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return chk, false, nil
+	}
+	if err != nil || chk.Status != "pending" {
+		return chk, false, err
+	}
+	last, err := q.LatestKYCCheck(ctx, chk.UserID)
+	if err != nil {
+		return chk, false, err
+	}
+	cur, err := q.GetUserKYCStatus(ctx, chk.UserID)
+	return chk, last.ID == checkID && Status(cur) == Pending, err
+}
+
+// Process verifies a pending submission with the provider and records the outcome. It is the body of the queue job
+// and is safe to run more than once: a check that is no longer pending is ignored. A provider outage returns
+// ErrProviderUnavailable so the queue retries; Abandon closes the submission once retries are exhausted.
+func (s *Service) Process(ctx context.Context, checkID string) error {
+	chk, live, err := s.pendingCheck(ctx, store.New(s.pool), checkID)
+	if err != nil || !live {
+		return err
+	}
+	id, err := s.kr.Decrypt(chk.IDNumberEnc, []byte("kyc.id_number"))
+	if err != nil {
+		return err
+	}
+	nm, err := s.kr.Decrypt(chk.FullNameEnc, []byte("kyc.full_name"))
+	if err != nil {
+		return err
+	}
+	dobRaw, err := s.kr.Decrypt(chk.DateOfBirthEnc, []byte("kyc.dob"))
+	if err != nil {
+		return err
+	}
+	dob, err := time.Parse(time.DateOnly, string(dobRaw))
+	if err != nil {
+		return err
+	}
+	res, perr := s.prov.Verify(ctx, Request{IDNumber: string(id), FullName: string(nm), DateOfBirth: dob})
+	if perr != nil {
+		return ErrProviderUnavailable
+	}
+	outcome, reason := ManualReview, "automated verification: details did not match"
+	if res.Found && res.NameMatch && res.DOBMatch {
+		outcome, reason = Verified, "automated verification"
+	}
+	err = s.finish(ctx, chk, outcome, reason, &res)
+	if errors.Is(err, ErrIDAlreadyRegistered) { // lost the race for this national ID to another account
+		return s.finish(ctx, chk, Rejected, "national ID already registered to another account", &res)
+	}
+	return err
+}
+
+// Abandon closes a pending submission whose verification could not be completed, so the player can resubmit.
+func (s *Service) Abandon(ctx context.Context, checkID string) error {
+	chk, live, err := s.pendingCheck(ctx, store.New(s.pool), checkID)
+	if err != nil || !live {
+		return err
+	}
+	return s.finish(ctx, chk, None, "verification unavailable: retries exhausted", nil)
+}
+
+// finish appends the outcome row (superseding the pending one) and updates the account, if the check is still live.
+// outcome None records an error row and leaves the account unverified.
+func (s *Service) finish(ctx context.Context, chk store.GetKYCCheckRow, outcome Status, reason string, res *Result) error {
+	now, err := s.clk.Now(ctx, s.pool)
+	if err != nil {
+		return err
+	}
+	return pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		q := store.New(tx)
+		if _, err := q.LockUserKYC(ctx, chk.UserID); err != nil {
+			return err
+		}
+		if _, live, err := s.pendingCheck(ctx, q, chk.ID); err != nil || !live {
+			return err
+		}
+		rec := checkRecord{
+			idEnc: chk.IDNumberEnc, nameEnc: chk.FullNameEnc, dobEnc: chk.DateOfBirthEnc, hash: chk.IDNumberHash, adult: true,
+			provider: chk.Provider, reviewer: "system:" + chk.Provider, reason: reason,
+		}
+		var hashToSet []byte
+		switch outcome {
+		case Verified:
+			rec.status, hashToSet = "verified", chk.IDNumberHash
+		case ManualReview:
+			rec.status = "manual_review"
+		case Rejected:
+			rec.status = "rejected"
+		default:
+			rec.status = "error"
+		}
+		if res != nil {
+			rec.providerRef, rec.nameMatch, rec.dobMatch = res.Ref, &res.NameMatch, &res.DOBMatch
+		}
+		if _, err := insertCheck(ctx, q, chk.UserID, &chk.ID, rec, now); err != nil {
+			return err
+		}
+		if err := q.SetUserKYC(ctx, store.SetUserKYCParams{KycStatus: string(outcome), NationalIDHash: hashToSet, At: now, ID: chk.UserID}); err != nil {
+			return mapUnique(err)
+		}
+		return nil
+	})
 }
 
 type checkRecord struct {

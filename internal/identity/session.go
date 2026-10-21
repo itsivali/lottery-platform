@@ -51,8 +51,8 @@ func (s *Service) issue(ctx context.Context, q *store.Queries, userID, sessionID
 }
 
 // startSession registers the device, opens a session and issues the first tokens.
-func (s *Service) startSession(ctx context.Context, q *store.Queries, userID string, dev Device, now time.Time) (Tokens, error) {
-	deviceID, err := s.registerDevice(ctx, q, userID, dev, now)
+func (s *Service) startSession(ctx context.Context, q *store.Queries, userID string, dev Device, verdict string, now time.Time) (Tokens, error) {
+	deviceID, err := s.registerDevice(ctx, q, userID, dev, verdict, now)
 	if err != nil {
 		return Tokens{}, err
 	}
@@ -69,6 +69,7 @@ func (s *Service) VerifyOTP(ctx context.Context, rawMSISDN, code string, dev Dev
 	if err != nil {
 		return Tokens{}, ErrOTPInvalid
 	}
+	verdict := s.verdict(ctx, dev)
 	var tokens Tokens
 	var outcome error
 	err = s.withTx(ctx, func(tx pgx.Tx, q *store.Queries, now time.Time) error {
@@ -92,7 +93,7 @@ func (s *Service) VerifyOTP(ctx context.Context, rawMSISDN, code string, dev Dev
 				return err
 			}
 		}
-		tokens, err = s.startSession(ctx, q, u.ID, dev, now)
+		tokens, err = s.startSession(ctx, q, u.ID, dev, verdict, now)
 		return err
 	})
 	if err != nil {

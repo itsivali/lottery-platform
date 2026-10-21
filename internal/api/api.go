@@ -28,6 +28,8 @@ type Deps struct {
 	Limiter  *ratelimit.Limiter
 	// TrustedProxyHeader is the header our load balancer sets with the client address ("" = use the socket address).
 	TrustedProxyHeader string
+	// TrustedProxyHops is how many trusted proxies appended to X-Forwarded-For (ignored for other headers).
+	TrustedProxyHops int
 }
 
 type ctxKey struct{}
@@ -69,7 +71,9 @@ func Mount(d Deps) func(chi.Router) {
 
 type handlers struct{ Deps }
 
-func (h *handlers) clientIP(r *http.Request) string { return httpx.ClientIP(r, h.TrustedProxyHeader) }
+func (h *handlers) clientIP(r *http.Request) string {
+	return httpx.ClientIPHops(r, h.TrustedProxyHeader, h.TrustedProxyHops)
+}
 
 // optionalAuth attaches the principal when a valid bearer token is present; protected routes enforce it separately.
 func (h *handlers) optionalAuth(next http.Handler) http.Handler {

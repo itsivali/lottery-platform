@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/itsivali/lottery-platform/internal/audit"
@@ -21,11 +22,38 @@ import (
 	"github.com/itsivali/lottery-platform/internal/platform/testpg"
 )
 
+// recorder is an Enqueuer that remembers the job enqueued for each user instead of running it.
+type recorder struct {
+	mu   sync.Mutex
+	jobs map[string]string // user id -> check id
+	n    int
+}
+
+func (r *recorder) EnqueueVerify(_ context.Context, _ pgx.Tx, checkID, userID string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.jobs == nil {
+		r.jobs = map[string]string{}
+	}
+	r.jobs[userID] = checkID
+	r.n++
+	return nil
+}
+
+func (r *recorder) take(user string) string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	id := r.jobs[user]
+	delete(r.jobs, user)
+	return id
+}
+
 type env struct {
 	pool *pgxpool.Pool
 	clk  *clock.Manual
 	prov *kyc.Mock
 	kr   *crypto.Keyring
+	enq  *recorder
 	svc  *kyc.Service
 }
 
@@ -38,8 +66,8 @@ func setup(t *testing.T) *env {
 	if err != nil {
 		t.Fatal(err)
 	}
-	e := &env{pool: pool, clk: clock.NewManual(time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC)), prov: kyc.NewMock(), kr: kr}
-	e.svc = kyc.NewService(pool, e.clk, e.prov, kr, []byte("0123456789abcdef0123456789abcdef"), audit.NewWriter())
+	e := &env{pool: pool, clk: clock.NewManual(time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC)), prov: kyc.NewMock(), kr: kr, enq: &recorder{}}
+	e.svc = kyc.NewService(pool, e.clk, e.prov, kr, []byte("0123456789abcdef0123456789abcdef"), audit.NewWriter(), e.enq)
 	return e
 }
 
@@ -53,6 +81,22 @@ func (e *env) user(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return id
+}
+
+// submit stores the submission and then runs its verification job, returning the final status. A submission that
+// is refused up front (invalid, under age, duplicate...) returns its error from Submit alone.
+func (e *env) submit(ctx context.Context, user string, in kyc.Submission) (kyc.Status, error) {
+	st, err := e.svc.Submit(ctx, user, in)
+	if err != nil {
+		return "", err
+	}
+	if st != kyc.Pending {
+		return st, nil
+	}
+	if err := e.svc.Process(ctx, e.enq.take(user)); err != nil {
+		return "", err
+	}
+	return e.svc.Status(ctx, user)
 }
 
 func (e *env) userStatus(t *testing.T, id string) (status string, hasHash bool) {
@@ -80,7 +124,7 @@ func TestSubmit_ExactMatchVerifiesTheAccountAndEncryptsTheIDNumber(t *testing.T)
 	e := setup(t)
 	e.registerJane()
 	u := e.user(t)
-	st, err := e.svc.Submit(context.Background(), u, jane)
+	st, err := e.submit(context.Background(), u, jane)
 	if err != nil || st != kyc.Verified {
 		t.Fatalf("status = %q, %v", st, err)
 	}
@@ -109,7 +153,7 @@ func TestSubmit_MismatchesGoToManualReviewWithoutClaimingTheID(t *testing.T) {
 		e := setup(t)
 		e.registerJane()
 		u := e.user(t)
-		st, err := e.svc.Submit(context.Background(), u, in)
+		st, err := e.submit(context.Background(), u, in)
 		if err != nil || st != kyc.ManualReview {
 			t.Errorf("%s: status = %q, %v", name, st, err)
 		}
@@ -124,7 +168,7 @@ func TestSubmit_NameMatchingIgnoresCaseAndSpacing(t *testing.T) {
 	e.registerJane()
 	in := jane
 	in.FullName = "  jane   WANJIRU kamau "
-	if st, err := e.svc.Submit(context.Background(), e.user(t), in); err != nil || st != kyc.Verified {
+	if st, err := e.submit(context.Background(), e.user(t), in); err != nil || st != kyc.Verified {
 		t.Fatalf("status = %q, %v", st, err)
 	}
 }
@@ -135,7 +179,7 @@ func TestSubmit_UnderageIsRefusedUsingTheNairobiDateAndStoresNothing(t *testing.
 	u := e.user(t)
 	// 2026-10-21 12:00 UTC = 15:00 EAT: someone born 2008-10-21 turns 18 today
 	in := kyc.Submission{IDNumber: "11111111", FullName: "Young Person", DateOfBirth: "2008-10-22"}
-	if _, err := e.svc.Submit(ctx, u, in); !errors.Is(err, kyc.ErrUnderage) {
+	if _, err := e.submit(ctx, u, in); !errors.Is(err, kyc.ErrUnderage) {
 		t.Fatalf("born tomorrow-18: err = %v", err)
 	}
 	if e.checks(t, u) != 0 {
@@ -144,7 +188,7 @@ func TestSubmit_UnderageIsRefusedUsingTheNairobiDateAndStoresNothing(t *testing.
 	// 22:00 UTC = 01:00 EAT on the 22nd: in Nairobi the 22nd has begun, so they are 18
 	e.clk.Set(time.Date(2026, 10, 21, 22, 0, 0, 0, time.UTC))
 	e.prov.Register("11111111", "Young Person", time.Date(2008, 10, 22, 0, 0, 0, 0, time.UTC))
-	if st, err := e.svc.Submit(ctx, u, in); err != nil || st != kyc.Verified {
+	if st, err := e.submit(ctx, u, in); err != nil || st != kyc.Verified {
 		t.Fatalf("turned 18 in Nairobi: %q, %v", st, err)
 	}
 }
@@ -154,10 +198,10 @@ func TestSubmit_OneIDOneAccount(t *testing.T) {
 	ctx := context.Background()
 	e.registerJane()
 	a, b := e.user(t), e.user(t)
-	if _, err := e.svc.Submit(ctx, a, jane); err != nil {
+	if _, err := e.submit(ctx, a, jane); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := e.svc.Submit(ctx, b, jane); !errors.Is(err, kyc.ErrIDAlreadyRegistered) {
+	if _, err := e.submit(ctx, b, jane); !errors.Is(err, kyc.ErrIDAlreadyRegistered) {
 		t.Fatalf("second account err = %v", err)
 	}
 	if e.checks(t, b) != 0 {
@@ -174,28 +218,23 @@ func TestSubmit_ConcurrentClaimsOfOneIDYieldExactlyOneVerifiedAccount(t *testing
 		users[i] = e.user(t)
 	}
 	var wg sync.WaitGroup
-	results := make(chan error, n)
 	for _, u := range users {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_, err := e.svc.Submit(context.Background(), u, jane)
-			results <- err
+			// refused at submission (ErrIDAlreadyRegistered) or rejected when processed: both are fine
+			if _, err := e.submit(context.Background(), u, jane); err != nil && !errors.Is(err, kyc.ErrIDAlreadyRegistered) {
+				t.Errorf("unexpected error: %v", err)
+			}
 		}()
 	}
 	wg.Wait()
-	close(results)
-	ok := 0
-	for err := range results {
-		switch {
-		case err == nil:
-			ok++
-		case !errors.Is(err, kyc.ErrIDAlreadyRegistered):
-			t.Errorf("unexpected error: %v", err)
-		}
+	var verified int
+	if err := e.pool.QueryRow(context.Background(), `SELECT count(*) FROM identity.users WHERE kyc_status = 'verified'`).Scan(&verified); err != nil {
+		t.Fatal(err)
 	}
-	if ok != 1 {
-		t.Fatalf("%d accounts verified for one ID, want 1", ok)
+	if verified != 1 {
+		t.Fatalf("%d accounts verified for one ID, want 1", verified)
 	}
 }
 
@@ -204,37 +243,149 @@ func TestSubmit_ResubmissionRules(t *testing.T) {
 	ctx := context.Background()
 	e.registerJane()
 	a, b := e.user(t), e.user(t)
-	if _, err := e.svc.Submit(ctx, a, jane); err != nil {
+	if _, err := e.submit(ctx, a, jane); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := e.svc.Submit(ctx, a, jane); !errors.Is(err, kyc.ErrAlreadyVerified) {
+	if _, err := e.submit(ctx, a, jane); !errors.Is(err, kyc.ErrAlreadyVerified) {
 		t.Errorf("verified resubmit err = %v", err)
 	}
-	if _, err := e.svc.Submit(ctx, b, kyc.Submission{IDNumber: "99999999", FullName: "Nobody Known", DateOfBirth: "1991-01-01"}); err != nil {
+	if _, err := e.submit(ctx, b, kyc.Submission{IDNumber: "99999999", FullName: "Nobody Known", DateOfBirth: "1991-01-01"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := e.svc.Submit(ctx, b, jane); !errors.Is(err, kyc.ErrInReview) {
+	if _, err := e.submit(ctx, b, jane); !errors.Is(err, kyc.ErrInReview) {
 		t.Errorf("resubmit while in review err = %v", err)
 	}
 }
 
-func TestSubmit_ProviderOutageIsRecordedAndRetryable(t *testing.T) {
+func TestSubmit_StoresAPendingCheckAndEnqueuesTheJobInTheSameTransaction(t *testing.T) {
+	e := setup(t)
+	e.registerJane()
+	u := e.user(t)
+	st, err := e.svc.Submit(context.Background(), u, jane)
+	if err != nil || st != kyc.Pending {
+		t.Fatalf("status = %q, %v", st, err)
+	}
+	if s, hash := e.userStatus(t, u); s != "pending" || hash {
+		t.Fatalf("user %q hash=%v", s, hash)
+	}
+	if e.enq.n != 1 || e.checks(t, u) != 1 {
+		t.Fatalf("jobs=%d checks=%d, want 1/1", e.enq.n, e.checks(t, u))
+	}
+	if _, err := e.svc.Submit(context.Background(), u, jane); !errors.Is(err, kyc.ErrInReview) {
+		t.Fatalf("resubmit while pending err = %v", err)
+	}
+}
+
+type failingEnqueuer struct{}
+
+func (failingEnqueuer) EnqueueVerify(context.Context, pgx.Tx, string, string) error {
+	return errors.New("queue down")
+}
+
+func TestSubmit_IfTheJobCannotBeEnqueuedNothingIsStored(t *testing.T) {
+	e := setup(t)
+	u := e.user(t)
+	svc := kyc.NewService(e.pool, e.clk, e.prov, e.kr, []byte("0123456789abcdef0123456789abcdef"), audit.NewWriter(), failingEnqueuer{})
+	if _, err := svc.Submit(context.Background(), u, jane); err == nil {
+		t.Fatal("submit succeeded although its job could not be enqueued")
+	}
+	if s, _ := e.userStatus(t, u); s != "none" || e.checks(t, u) != 0 {
+		t.Fatalf("a half-done submission remained: status=%q checks=%d", s, e.checks(t, u))
+	}
+}
+
+func TestProcess_ProviderOutageIsRetryableAndAbandonmentLetsThePlayerResubmit(t *testing.T) {
 	e := setup(t)
 	ctx := context.Background()
 	e.registerJane()
 	u := e.user(t)
+	if _, err := e.svc.Submit(ctx, u, jane); err != nil {
+		t.Fatal(err)
+	}
+	check := e.enq.take(u)
 	e.prov.FailNext(errors.New("timeout"))
-	if _, err := e.svc.Submit(ctx, u, jane); !errors.Is(err, kyc.ErrProviderUnavailable) {
-		t.Fatalf("err = %v", err)
+	if err := e.svc.Process(ctx, check); !errors.Is(err, kyc.ErrProviderUnavailable) {
+		t.Fatalf("Process during an outage = %v, want ErrProviderUnavailable so the queue retries", err)
 	}
-	if s, _ := e.userStatus(t, u); s != "none" {
-		t.Fatalf("status after outage = %q, want none", s)
+	if s, _ := e.userStatus(t, u); s != "pending" {
+		t.Fatalf("status during outage = %q, want pending", s)
 	}
-	if e.checks(t, u) != 1 {
-		t.Fatal("the failed attempt was not recorded")
+	if err := e.svc.Process(ctx, check); err != nil { // the retry succeeds
+		t.Fatal(err)
 	}
-	if st, err := e.svc.Submit(ctx, u, jane); err != nil || st != kyc.Verified {
-		t.Fatalf("retry: %q, %v", st, err)
+	if st, _ := e.svc.Status(ctx, u); st != kyc.Verified {
+		t.Fatalf("status after retry = %q", st)
+	}
+
+	// a second player whose retries are exhausted
+	v := e.user(t)
+	other := kyc.Submission{IDNumber: "44444444", FullName: "Some Body", DateOfBirth: "1991-01-01"}
+	if _, err := e.svc.Submit(ctx, v, other); err != nil {
+		t.Fatal(err)
+	}
+	check = e.enq.take(v)
+	if err := e.svc.Abandon(ctx, check); err != nil {
+		t.Fatal(err)
+	}
+	if s, _ := e.userStatus(t, v); s != "none" {
+		t.Fatalf("status after abandonment = %q, want none", s)
+	}
+	if e.checks(t, v) != 2 {
+		t.Fatalf("%d check rows, want pending + error", e.checks(t, v))
+	}
+	if _, err := e.svc.Submit(ctx, v, other); err != nil {
+		t.Fatalf("resubmission after abandonment: %v", err)
+	}
+}
+
+func TestProcess_IsIdempotentAndIgnoresStaleJobs(t *testing.T) {
+	e := setup(t)
+	ctx := context.Background()
+	e.registerJane()
+	u := e.user(t)
+	_, _ = e.svc.Submit(ctx, u, jane)
+	check := e.enq.take(u)
+	if err := e.svc.Process(ctx, check); err != nil {
+		t.Fatal(err)
+	}
+	rows := e.checks(t, u)
+	for range 3 { // a redelivered job must not add rows or change the outcome
+		if err := e.svc.Process(ctx, check); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if e.checks(t, u) != rows {
+		t.Fatalf("redelivery added rows: %d -> %d", rows, e.checks(t, u))
+	}
+	if err := e.svc.Process(ctx, "00000000-0000-7000-8000-000000000999"); err != nil {
+		t.Fatalf("unknown check id should be a no-op, got %v", err)
+	}
+	if err := e.svc.Abandon(ctx, check); err != nil { // abandoning a finished check changes nothing
+		t.Fatal(err)
+	}
+	if st, _ := e.svc.Status(ctx, u); st != kyc.Verified {
+		t.Fatalf("abandon undid a verified account: %q", st)
+	}
+}
+
+func TestProcess_AClaimLostToAnotherAccountIsRejectedNotVerified(t *testing.T) {
+	e := setup(t)
+	ctx := context.Background()
+	e.registerJane()
+	a, b := e.user(t), e.user(t)
+	// both submit before either is processed, so the up-front duplicate check passes for both
+	_, _ = e.svc.Submit(ctx, a, jane)
+	_, _ = e.svc.Submit(ctx, b, jane)
+	if err := e.svc.Process(ctx, e.enq.take(a)); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.svc.Process(ctx, e.enq.take(b)); err != nil {
+		t.Fatal(err)
+	}
+	sa, _ := e.svc.Status(ctx, a)
+	sb, _ := e.svc.Status(ctx, b)
+	if sa != kyc.Verified || sb != kyc.Rejected {
+		t.Fatalf("a=%q b=%q, want verified/rejected", sa, sb)
 	}
 }
 
@@ -254,7 +405,7 @@ func TestSubmit_ValidatesInput(t *testing.T) {
 		{IDNumber: "12345678", FullName: "Jane Doe", DateOfBirth: "1899-12-31"},
 	}
 	for i, in := range bad {
-		if _, err := e.svc.Submit(context.Background(), u, in); !errors.Is(err, kyc.ErrInvalidInput) {
+		if _, err := e.submit(context.Background(), u, in); !errors.Is(err, kyc.ErrInvalidInput) {
 			t.Errorf("case %d (%+v): err = %v, want ErrInvalidInput", i, in, err)
 		}
 	}
@@ -273,7 +424,7 @@ func TestReview_ApproveAndRejectAppendSupersedingRowsAndAreAudited(t *testing.T)
 		if u == b {
 			in = kyc.Submission{IDNumber: "55555555", FullName: "Other Person", DateOfBirth: "1985-02-02"}
 		}
-		if _, err := e.svc.Submit(ctx, u, kyc.Submission{IDNumber: in.IDNumber, FullName: "Wrong Name", DateOfBirth: in.DateOfBirth}); err != nil {
+		if _, err := e.submit(ctx, u, kyc.Submission{IDNumber: in.IDNumber, FullName: "Wrong Name", DateOfBirth: in.DateOfBirth}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -305,11 +456,11 @@ func TestReview_ApprovingADuplicateIDIsRefused(t *testing.T) {
 	ctx := context.Background()
 	e.registerJane()
 	a, b := e.user(t), e.user(t)
-	if _, err := e.svc.Submit(ctx, a, jane); err != nil {
+	if _, err := e.submit(ctx, a, jane); err != nil {
 		t.Fatal(err)
 	}
 	// b claims the same ID with a wrong name: no duplicate yet blocks it at submission? it must, ID is taken
-	if _, err := e.svc.Submit(ctx, b, kyc.Submission{IDNumber: "12345678", FullName: "Wrong", DateOfBirth: "1990-05-17"}); !errors.Is(err, kyc.ErrIDAlreadyRegistered) {
+	if _, err := e.submit(ctx, b, kyc.Submission{IDNumber: "12345678", FullName: "Wrong", DateOfBirth: "1990-05-17"}); !errors.Is(err, kyc.ErrIDAlreadyRegistered) {
 		t.Fatalf("err = %v", err)
 	}
 }

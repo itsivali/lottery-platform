@@ -12,6 +12,7 @@ type Mock struct {
 	mu      sync.Mutex
 	records map[string]record
 	fail    error
+	down    error
 }
 
 type record struct {
@@ -36,6 +37,13 @@ func (m *Mock) FailNext(err error) {
 	m.fail = err
 }
 
+// SetDown makes every Verify fail until SetDown(nil) is called (a sustained outage).
+func (m *Mock) SetDown(err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.down = err
+}
+
 // Name implements Provider.
 func (*Mock) Name() string { return "mock" }
 
@@ -43,6 +51,9 @@ func (*Mock) Name() string { return "mock" }
 func (m *Mock) Verify(_ context.Context, r Request) (Result, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.down != nil {
+		return Result{}, m.down
+	}
 	if m.fail != nil {
 		err := m.fail
 		m.fail = nil

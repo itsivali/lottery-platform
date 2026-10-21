@@ -110,7 +110,7 @@ func (e *env) login(t *testing.T, msisdn string, dev identity.Device) identity.T
 	return tok
 }
 
-var phone = identity.Device{Fingerprint: "fp-1", Platform: "android", Attestation: "passed"}
+var phone = identity.Device{Fingerprint: "fp-1", Platform: "android"}
 
 func TestOTP_RequestSendsASixDigitCodeAndStoresOnlyItsMAC(t *testing.T) {
 	e := setup(t)
@@ -262,7 +262,7 @@ func TestAccessToken_AuthenticatesUntilItExpiresOrTheSessionEnds(t *testing.T) {
 	if _, err := e.svc.Authenticate(ctx, tok.Access); !errors.Is(err, identity.ErrTokenInvalid) {
 		t.Errorf("token for a logged-out session accepted: %v", err)
 	}
-	tok2 := e.login(t, e.newMSISDN(), identity.Device{Fingerprint: "fp-2", Platform: "ios", Attestation: "passed"})
+	tok2 := e.login(t, e.newMSISDN(), identity.Device{Fingerprint: "fp-2", Platform: "ios"})
 	e.clk.Advance(10*time.Minute + time.Second)
 	if _, err := e.svc.Authenticate(ctx, tok2.Access); !errors.Is(err, identity.ErrTokenInvalid) {
 		t.Errorf("expired token accepted: %v", err)
@@ -352,7 +352,7 @@ func TestRefresh_UnknownExpiredAndWrongDeviceTokensAreRefused(t *testing.T) {
 	if _, err := e.svc.Refresh(ctx, tok.Refresh, phone.Fingerprint); !errors.Is(err, identity.ErrTokenInvalid) {
 		t.Errorf("session survived a wrong-device refresh: %v", err)
 	}
-	tok = e.login(t, e.newMSISDN(), identity.Device{Fingerprint: "fp-9", Platform: "android", Attestation: "passed"})
+	tok = e.login(t, e.newMSISDN(), identity.Device{Fingerprint: "fp-9", Platform: "android"})
 	e.clk.Advance(31 * 24 * time.Hour)
 	if _, err := e.svc.Refresh(ctx, tok.Refresh, "fp-9"); !errors.Is(err, identity.ErrTokenInvalid) {
 		t.Errorf("expired refresh token err = %v", err)
@@ -362,7 +362,7 @@ func TestRefresh_UnknownExpiredAndWrongDeviceTokensAreRefused(t *testing.T) {
 func TestDevices_ThirdAccountOnTheSameDeviceIsRefused(t *testing.T) {
 	e := setup(t)
 	ctx := context.Background()
-	dev := identity.Device{Fingerprint: "shared-phone", Platform: "android", Attestation: "passed"}
+	dev := identity.Device{Fingerprint: "shared-phone", Platform: "android"}
 	a, b, c := e.newMSISDN(), e.newMSISDN(), e.newMSISDN()
 	e.login(t, a, dev)
 	e.login(t, b, dev)
@@ -433,7 +433,7 @@ func TestSSO_SubjectCannotBeLinkedToTwoAccountsAndBadTokensAreRefused(t *testing
 	e := setup(t)
 	ctx := context.Background()
 	mk := func(fp string) string {
-		tok := e.login(t, e.newMSISDN(), identity.Device{Fingerprint: fp, Platform: "android", Attestation: "passed"})
+		tok := e.login(t, e.newMSISDN(), identity.Device{Fingerprint: fp, Platform: "android"})
 		p, _ := e.svc.Authenticate(ctx, tok.Access)
 		if _, err := e.pool.Exec(ctx, `UPDATE identity.users SET kyc_status='verified', national_id_hash=decode(md5($1::text),'hex') WHERE id = $2::uuid`, p.UserID, p.UserID); err != nil {
 			t.Fatal(err)
@@ -483,6 +483,82 @@ func TestEligibility_OnlyActiveKYCVerifiedAccountsMayTransact(t *testing.T) {
 		}
 		if err := check(); !errors.Is(err, identity.ErrAccountSuspended) {
 			t.Errorf("status %s: err = %v", st, err)
+		}
+	}
+}
+
+// fakeAttestor passes tokens starting with "good", refuses "bad" and is down for "outage".
+type fakeAttestor struct{}
+
+func (fakeAttestor) Verify(_ context.Context, platform, token, nonce string) (bool, error) {
+	switch {
+	case strings.HasPrefix(token, "good"):
+		return platform == "android" || platform == "ios", nil
+	case token == "outage":
+		return false, errors.New("attestation service down")
+	}
+	return false, nil
+}
+
+func TestAttestation_VerdictComesFromTheServerSideVerifierNeverFromTheClient(t *testing.T) {
+	e := setup(t)
+	e.svc.WithAttestor(fakeAttestor{})
+	ctx := context.Background()
+	verdictFor := func(token string) string {
+		t.Helper()
+		seq++
+		m := e.newMSISDN()
+		dev := identity.Device{Fingerprint: fmt.Sprintf("att-%d", seq), Platform: "android", AttestationToken: token}
+		tok := e.login(t, m, dev)
+		var v string
+		if err := e.pool.QueryRow(ctx, `SELECT d.attestation_verdict FROM identity.devices d JOIN identity.sessions s ON s.device_id = d.id
+			JOIN identity.users u ON u.id = s.user_id WHERE u.msisdn = $1`, m).Scan(&v); err != nil {
+			t.Fatal(err)
+		}
+		_ = tok
+		return v
+	}
+	if got := verdictFor("good-token"); got != "passed" {
+		t.Errorf("valid token -> %q, want passed", got)
+	}
+	if got := verdictFor("bad-token"); got != "failed" {
+		t.Errorf("rejected token -> %q, want failed", got)
+	}
+	if got := verdictFor(""); got != "none" {
+		t.Errorf("no token -> %q, want none", got)
+	}
+	if got := verdictFor("outage"); got != "none" {
+		t.Errorf("verifier outage -> %q, want none (unknown, not passed)", got)
+	}
+}
+
+func TestAttestation_FailedDevicesCannotTransactAndStrictModeRequiresAPass(t *testing.T) {
+	ctx := context.Background()
+	for _, c := range []struct {
+		name     string
+		token    string
+		platform string
+		strict   bool
+		wantErr  error
+	}{
+		{"passed device", "good", "android", true, nil},
+		{"failed device, lenient", "bad", "android", false, identity.ErrAttestationFailed},
+		{"failed device, strict", "bad", "android", true, identity.ErrAttestationFailed},
+		{"unattested device, lenient", "", "android", false, nil},
+		{"unattested device, strict", "", "android", true, identity.ErrAttestationFailed},
+		{"web is not attestable", "", "web", true, nil},
+	} {
+		e := setup(t)
+		e.svc.WithAttestor(fakeAttestor{})
+		dev := identity.Device{Fingerprint: "fp-att", Platform: c.platform, AttestationToken: c.token}
+		if c.platform == "web" {
+			dev.Fingerprint = ""
+		}
+		tok := e.login(t, e.newMSISDN(), dev)
+		p, _ := e.svc.Authenticate(ctx, tok.Access)
+		err := pgx.BeginFunc(ctx, e.pool, func(tx pgx.Tx) error { return e.svc.AssertDeviceTrusted(ctx, tx, p.SessionID, c.strict) })
+		if !errors.Is(err, c.wantErr) {
+			t.Errorf("%s: err = %v, want %v", c.name, err, c.wantErr)
 		}
 	}
 }
