@@ -14,8 +14,17 @@ type Config struct {
 
 // Load reads configuration from environment variables.
 func Load() (Config, error) {
+	addr := getenv("HTTP_ADDR", "")
+	if addr == "" {
+		// Hosting platforms such as Render provide the listen port as PORT.
+		if port := os.Getenv("PORT"); port != "" {
+			addr = ":" + port
+		} else {
+			addr = ":8080"
+		}
+	}
 	cfg := Config{
-		HTTPAddr:    getenv("HTTP_ADDR", ":8080"),
+		HTTPAddr:    addr,
 		DatabaseURL: os.Getenv("DATABASE_URL"),
 	}
 	if cfg.DatabaseURL == "" {

@@ -1,0 +1,21 @@
+databases:
+  - name: lottery-db
+    plan: free
+    databaseName: lottery
+    user: lottery
+
+services:
+  - type: web
+    name: lottery-api
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /healthz
+    envVars:
+      - key: TARGET
+        value: cmd/api
+      - key: DATABASE_URL
+        fromDatabase:
+          name: lottery-db
+          property: connectionString
