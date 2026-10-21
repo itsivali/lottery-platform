@@ -1,6 +1,6 @@
 # Phase 1 — Foundations: checkpoint
 
-Status: IN PROGRESS
+Status: COMPLETE — awaiting human go-ahead
 
 ## Plan (written before coding)
 
@@ -38,4 +38,69 @@ auth bypass and IDOR tests on every endpoint.
 ### Slice 5 — OTel, ERD, checkpoint report.
 
 ## Results
-(filled in at the end of the phase)
+
+All work landed through squash-merged PRs with a green `ci-ok`: #12 schema, #13 ledger and wallet, #14 idempotency,
+rate limit and audit, #15 identity, #16 KYC and responsible gaming, #17 HTTP API and OpenAPI, plus the PR for this
+report (telemetry, ERD, checkpoint). Final local run of what CI runs (`make ci`):
+
+- lint: `0 issues` (golangci-lint, go vet, actionlint, gofmt)
+- 169 top-level tests across unit, integration (real Postgres 16 and Valkey 8 via testcontainers) and property tests,
+  all passing with `-race -shuffle=on -count=1`
+- coverage 88.1% overall (gate 70%); `internal/wallet` 87.5% and `internal/ledger` 94.5% (gate 85%). Coverage is now
+  measured with `-coverpkg=./...` and duplicate profile blocks are merged in `scripts/check-coverage.sh`; sqlc-generated
+  `store` packages are excluded like `main.go` files.
+- `make e2e` (compose stack with the telemetry-wired api binary): `e2e smoke ok`
+- `make erd` regenerates `docs/erd.svg` from a freshly migrated database: 32 tables, 32 foreign keys.
+- `npx @redocly/cli lint api/openapi.yaml`: valid (4 tag-description warnings).
+
+### Acceptance (brief section 11, phase 1)
+
+| Criterion | Evidence |
+|---|---|
+| Ledger property test | `TestLedgerWallet_Property_RandomSequencesKeepEverythingBalanced`: rapid, 100 random sequences of top-ups, plays, refunds, withdrawals, failed withdrawals, deposit reversals and prize payouts over two players; after every step all journals balance, every wallet equals the sum of its transactions and the ledger's player liability, and the balance is never negative. Pure rule properties in `internal/ledger`. |
+| Idempotency tests | `internal/platform/idempotency` (13 tests): replay, 422 on changed body or path, 409 for a concurrent duplicate (20 racing requests run the handler once), per-principal scope, 5xx not cached, expiry reuse, stale takeover. Plus `TestAPI_ReplayedRequestsReturnTheStoredResponseWithoutRepeatingTheEffect`. |
+| Negative-balance concurrency | `TestWallet_ConcurrentStakesNeverOverdraw` (50 goroutines on KES 1,000: exactly 10 succeed) and `TestWallet_ConcurrentStakesAndWithdrawalsNeverGoNegative`. The DB also rejects negative balances and drift between balance and transactions at commit. |
+| RG tests | `internal/rg`: cooling-off on increases, a new request voids a pending raise, time-outs cannot be shortened, 6m/1y/permanent self-exclusion, Nairobi window boundaries, deposit-limit check, restrictions append-only. |
+| Auth / IDOR tests | `internal/api`: every authenticated route refuses missing, garbage, foreign-signed and logged-out tokens; every write needs an `Idempotency-Key`; no route accepts a user id (bodies with `user_id` are rejected, per-id routes 404); B cannot see A's KYC or limits. Mutation check: removing `requireAuth` makes the auth test fail. |
+| ERD | `docs/erd.svg` |
+
+### Brief invariants covered so far (section 3)
+
+2 money is bigint (`TestSchema_MoneyIsIntegerAndTimeIsTimestamptz`, integer-only `ledger.Apply`); 3 no negative balance;
+4 balanced journals and wallet = sum of transactions (deferred triggers + property test); 5 append-only ledger, wallet
+transactions, audit log (grants and triggers that also stop owners); 6 play cap in the database (`tickets` CHECK +
+UNIQUE); 7 idempotency (middleware and unique business keys, ADR 0003); 10 time from an injectable clock (lint bans
+`time.Now`); 12 eligibility checks exist (`identity.AssertEligible`, `rg.AssertNotRestricted`) and are not yet called by
+any money path because top-ups and plays arrive in phases 2 and 3. Invariants 1, 8, 9, 11, 13 belong to later phases.
+
+### Deviations and honest notes
+
+- **TDD order:** the HTTP handlers in `internal/api` were written before their tests (tests followed in the same PR and
+  were mutation-checked). The `PORT` fallback in config was added in the Render fix without a test; the test was added
+  in this phase. Everything else was test-first with the red run observed.
+- **Pre-push flake:** one `make test-int` run in the pre-push hook failed once and passed on rerun with no change;
+  the cause was not identified. Watch for it before trusting the integration suite as non-flaky.
+- **Schema deviations** from the brief are recorded in ADR 0004 (idempotency principal, rerun-able draws, `user_id` on
+  ledger entries, extra wallet transaction kinds, `rg.limits.cancelled_at`).
+- **Handlers live in `internal/api`,** not in each module, so modules stay HTTP-free.
+- **Client attestation is never trusted:** the field is not accepted and every device is stored as `none` until the
+  server-side Play Integrity / App Attest verifier exists (phase 7). Failed attestation therefore cannot yet block play.
+
+### Deferred (not done in Phase 1)
+
+- **`/v1` is not mounted in `cmd/api`.** It needs secrets (OTP key, token key, KEK), Valkey and an SMS adapter that do
+  not exist in the deployment yet, so the Render service still serves only the health probes. Wiring lands with phase 2.
+- **KYC runs synchronously** inside `Submit`; the brief asks for a River job, which arrives when River is introduced
+  (phase 2). No real SMS, KYC or Google/Apple production configuration exists, only the interfaces, mocks and the real
+  JWKS verifier (tested against a local JWKS server).
+- **Database role provisioning:** roles are created `NOLOGIN` and objects are owned by `app_migrator`; creating login
+  roles and passwords, and whether Render's database user may run `ALTER ... OWNER TO app_migrator`, must be verified
+  when the Blueprint is finalised (phase 8).
+- **Mutation testing (gremlins)** has not been run against the new packages; the nightly job has not been exercised.
+- Keycloak/staff auth, device-bound push, the realtime WebSocket and the Valkey session store are untouched.
+
+### DECISION items touched
+Device-to-account cap 2, deposit-limit cooling-off 24 h, OTP expiry 5 min / 5 attempts / 60 s resend, access token
+10 min, refresh token 30 days (placeholder), idempotency key lifetime 24 h (placeholder). No tax rates were invented:
+with no `tax_rules` version in force the store returns `ErrNoTaxRule`. `TRUSTED_PROXY_HEADER` (the header Render's load
+balancer sets) must be configured before the API is exposed, or per-IP limits would key on the balancer's address.

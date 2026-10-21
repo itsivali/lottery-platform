@@ -14,10 +14,11 @@ import (
 	"github.com/itsivali/lottery-platform/internal/platform/config"
 	"github.com/itsivali/lottery-platform/internal/platform/db"
 	"github.com/itsivali/lottery-platform/internal/platform/httpx"
+	"github.com/itsivali/lottery-platform/internal/platform/telemetry"
 )
 
 func main() {
-	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	log := slog.New(telemetry.NewLogHandler(slog.NewJSONHandler(os.Stdout, nil)))
 	if err := run(log); err != nil {
 		log.Error("api exited", "err", err)
 		os.Exit(1)
@@ -38,9 +39,18 @@ func run(log *slog.Logger) error {
 	}
 	defer pool.Close()
 
+	tel, err := telemetry.New(ctx, telemetry.Config{ServiceName: "lottery-api", OTLPEndpoint: cfg.OTLPEndpoint})
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tel.Shutdown(context.Background()) }()
+	if cfg.MetricsAddr != "" {
+		go serveMetrics(log, cfg.MetricsAddr, tel)
+	}
+
 	srv := &http.Server{
 		Addr:              cfg.HTTPAddr,
-		Handler:           httpx.NewRouter(pool),
+		Handler:           tel.Middleware(httpx.NewRouter(pool)),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	errc := make(chan error, 1)
@@ -57,5 +67,15 @@ func run(log *slog.Logger) error {
 			return err
 		}
 		return nil
+	}
+}
+
+// serveMetrics exposes Prometheus metrics on an internal-only listener, separate from the public port.
+func serveMetrics(log *slog.Logger, addr string, tel *telemetry.Telemetry) {
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", tel.MetricsHandler())
+	srv := &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		log.Error("metrics listener stopped", "err", err)
 	}
 }

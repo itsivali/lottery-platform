@@ -10,6 +10,10 @@ import (
 type Config struct {
 	HTTPAddr    string
 	DatabaseURL string
+	// OTLPEndpoint is the OTLP/HTTP traces endpoint (host:port); empty disables trace export.
+	OTLPEndpoint string
+	// MetricsAddr is the internal Prometheus listener; empty disables it. Never the public port.
+	MetricsAddr string
 }
 
 // Load reads configuration from environment variables.
@@ -24,8 +28,13 @@ func Load() (Config, error) {
 		}
 	}
 	cfg := Config{
-		HTTPAddr:    addr,
-		DatabaseURL: os.Getenv("DATABASE_URL"),
+		HTTPAddr:     addr,
+		DatabaseURL:  os.Getenv("DATABASE_URL"),
+		OTLPEndpoint: os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"),
+		MetricsAddr:  getenv("METRICS_ADDR", "127.0.0.1:9464"),
+	}
+	if cfg.MetricsAddr == "off" {
+		cfg.MetricsAddr = ""
 	}
 	if cfg.DatabaseURL == "" {
 		return Config{}, errors.New("config: DATABASE_URL is required")

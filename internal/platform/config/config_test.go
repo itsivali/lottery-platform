@@ -29,3 +29,34 @@ func TestLoad_DefaultsAndOverrides(t *testing.T) {
 		t.Errorf("HTTPAddr = %q, want :9090", cfg.HTTPAddr)
 	}
 }
+
+func TestLoad_UsesRendersPORTWhenHTTPAddrIsUnset(t *testing.T) {
+	t.Setenv("DATABASE_URL", "postgres://x")
+	t.Setenv("HTTP_ADDR", "")
+	t.Setenv("PORT", "10000")
+	cfg, _ := config.Load()
+	if cfg.HTTPAddr != ":10000" {
+		t.Errorf("HTTPAddr = %q, want :10000", cfg.HTTPAddr)
+	}
+	t.Setenv("HTTP_ADDR", "127.0.0.1:7000") // an explicit address wins over PORT
+	cfg, _ = config.Load()
+	if cfg.HTTPAddr != "127.0.0.1:7000" {
+		t.Errorf("HTTPAddr = %q", cfg.HTTPAddr)
+	}
+}
+
+func TestLoad_TelemetrySettings(t *testing.T) {
+	t.Setenv("DATABASE_URL", "postgres://x")
+	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "")
+	t.Setenv("METRICS_ADDR", "")
+	cfg, _ := config.Load()
+	if cfg.OTLPEndpoint != "" || cfg.MetricsAddr != "127.0.0.1:9464" {
+		t.Errorf("defaults: %+v", cfg)
+	}
+	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "otel.example:4318")
+	t.Setenv("METRICS_ADDR", "off")
+	cfg, _ = config.Load()
+	if cfg.OTLPEndpoint != "otel.example:4318" || cfg.MetricsAddr != "" {
+		t.Errorf("overrides: %+v (METRICS_ADDR=off must disable the listener)", cfg)
+	}
+}

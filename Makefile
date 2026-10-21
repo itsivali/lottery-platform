@@ -2,7 +2,7 @@ SHELL := /bin/bash
 GO_UNIT_FLAGS := -race -shuffle=on -count=1
 COVER_FILE := coverage.out
 
-.PHONY: setup dev down gen gen-check lint test test-int test-all e2e cover ci skips openapi-lint
+.PHONY: setup dev down gen gen-check lint test test-int test-all e2e cover ci skips openapi-lint erd
 
 setup:  ## install git hooks
 	lefthook install
@@ -51,3 +51,11 @@ e2e:  ## journey against the compose stack
 	scripts/e2e.sh
 
 ci: lint skips test-all cover  ## exactly what CI runs for Go
+
+ERD_DSN := postgres://lottery:lottery@localhost:$${POSTGRES_PORT:-5433}/lottery?sslmode=disable
+
+erd:  ## regenerate docs/erd.svg from a freshly migrated local Postgres (needs Docker; Graphviz runs in a container)
+	docker compose up -d --wait postgres
+	DATABASE_URL="$(ERD_DSN)" go run ./cmd/lotteryctl migrate up
+	go run ./tools/erd "$(ERD_DSN)" | docker run --rm -i alpine:3.20 sh -c 'apk add -q graphviz font-dejavu >/dev/null 2>&1 && dot -Tsvg' > docs/erd.svg
+	docker compose stop postgres
