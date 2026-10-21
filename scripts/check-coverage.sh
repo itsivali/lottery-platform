@@ -8,7 +8,7 @@ fail=0
 # business code; they are exercised by the compose e2e smoke test instead.
 filtered=$(mktemp)
 trap 'rm -f "$filtered"' EXIT
-grep -vE '/main\.go:|/mocks/|/internal/platform/testpg/' "$prof" > "$filtered"
+grep -vE '/main\.go:|/mocks/|/internal/platform/test(pg|valkey)/|/store/(db|models|[a-z_]+\.sql)\.go:' "$prof" > "$filtered"
 prof="$filtered"
 total=$(go tool cover -func="$prof" | awk '/^total:/ {gsub("%","",$3); print $3}')
 echo "overall coverage: ${total}% (gate 70%)"
@@ -18,7 +18,8 @@ for pkg in wallet ledger tickets game draws payments payouts; do
   # only gate packages that have non-doc statements
   lines=$(grep -c "^$path" "$prof" || true)
   [ "$lines" -eq 0 ] && { echo "internal/$pkg: no code yet (gate skipped)"; continue; }
-  pct=$(grep "^$path" "$prof" | awk -F'[ :]' '{n=$(NF-1); c=$NF; tot+=n; if(c>0) cov+=n} END{printf "%.1f", 100*cov/tot}')
+  # a block appears once per test binary under -coverpkg: it is covered if any copy ran
+  pct=$(grep "^$path" "$prof" | awk '{k=$1; n[k]=$2; if ($3>0) hit[k]=1} END{for (k in n){tot+=n[k]; if (k in hit) cov+=n[k]} printf "%.1f", tot?100*cov/tot:0}')
   echo "internal/$pkg: ${pct}% (gate 85%)"
   awk -v t="$pct" 'BEGIN{exit !(t+0 < 85)}' && { echo "FAIL: internal/$pkg below 85%"; fail=1; }
 done

@@ -1,0 +1,23 @@
+version: "2"
+sql:
+  - engine: postgresql
+    schema: db/migrations
+    queries: db/queries/ledger.sql
+    gen:
+      go:
+        package: store
+        out: internal/ledger/store
+        sql_package: pgx/v5
+        overrides: &overrides
+          - { db_type: uuid, go_type: string }
+          - { db_type: uuid, nullable: true, go_type: { type: string, pointer: true } }
+          - { db_type: text, nullable: true, go_type: { type: string, pointer: true } }
+  - engine: postgresql
+    schema: db/migrations
+    queries: db/queries/wallet.sql
+    gen:
+      go:
+        package: store
+        out: internal/wallet/store
+        sql_package: pgx/v5
+        overrides: *overrides

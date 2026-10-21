@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
 	"github.com/testcontainers/testcontainers-go/wait"
@@ -91,4 +92,25 @@ func withDB(dsn, name string) string {
 	}
 	u.Path = "/" + name
 	return u.String()
+}
+
+// Pool returns a pgx pool on a fresh migrated database whose connections run as the given application role
+// (for example "app_api"), so tests exercise the real least-privilege grants.
+func Pool(t *testing.T, role string) *pgxpool.Pool {
+	t.Helper()
+	cfg, err := pgxpool.ParseConfig(Migrated(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.MaxConns = 25
+	cfg.AfterConnect = func(ctx context.Context, c *pgx.Conn) error {
+		_, err := c.Exec(ctx, "SET ROLE "+pgx.Identifier{role}.Sanitize())
+		return err
+	}
+	pool, err := pgxpool.NewWithConfig(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+	return pool
 }

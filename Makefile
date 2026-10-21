@@ -14,8 +14,10 @@ dev:  ## bring up the full local stack
 down:
 	docker compose down -v
 
-gen:  ## regenerate code (sqlc / oapi-codegen) -- nothing to generate yet in Phase 0
-	@if [ -f sqlc.yaml ]; then sqlc generate; fi
+gen:  ## regenerate code (sqlc / oapi-codegen)
+	@if [ -f sqlc.yaml ]; then \
+		if command -v sqlc >/dev/null; then sqlc generate; else go run github.com/sqlc-dev/sqlc/cmd/sqlc@v1.31.1 generate; fi; \
+	fi
 	@if [ -f api/oapi-codegen.yaml ]; then oapi-codegen -config api/oapi-codegen.yaml api/openapi.yaml; fi
 
 gen-check: gen  ## fail if generation changes anything
@@ -36,7 +38,7 @@ test-int:  ## integration tests (need Docker)
 test-all: test test-int
 
 cover:
-	go test -tags integration $(GO_UNIT_FLAGS) -coverprofile=$(COVER_FILE) ./...
+	go test -tags integration $(GO_UNIT_FLAGS) -coverpkg=./... -coverprofile=$(COVER_FILE) ./...
 	scripts/check-coverage.sh $(COVER_FILE)
 
 skips:
