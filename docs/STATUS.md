@@ -3,8 +3,9 @@
 Read this first at the start of every session.
 
 - **Phase:** 1 — Foundations: complete. **Phase 2 — Payments: in progress** (`docs/checkpoints/phase-2.md`). Slices 1
-  (Daraja client + mock) and 2 (STK top-up end to end, ADR 0006) are merged and live. **Slice 3 (C2B) waits for a real
-  paybill** (owner, 2026-10-22); reconciliation/reversals and realtime confirmation can proceed without it.
+  (Daraja client + mock), 2 (STK top-up, ADR 0006) and 4 (reversals, player debt, internal reconciliation, ADR 0007)
+  are merged and live. **Next: slice 3, C2B on the Daraja sandbox** (decisions below), then slice 5 (realtime).
+- **Session saved 2026-10-22.** Resume with slice 3 after the owner items below.
 - **Repo state:** the GitHub repository was **deleted and recreated on 2026-10-22** (to drop co-author attribution that
   GitHub kept in old PR refs and caches) and `main` was pushed from the local clone. PR numbers below #8 in these docs
   refer to the deleted repository. Commits and PRs carry only the owner's name.
@@ -40,6 +41,27 @@ Read this first at the start of every session.
 - Daraja: **sandbox only** (shortcode 174379). The owner's sandbox consumer key/secret and passkey work: a live KES 1
   push to the owner's test phone went pending (result 4999) and then paid (2026-10-22). They go into Render as
   `sync: false` variables, never into git.
+
+## Slice 3 (C2B) decisions (owner, 2026-10-22)
+
+- Sandbox C2B test shortcode **600982** (STK Push stays on 174379). Production needs a real paybill later.
+- **Account number = the player's registered phone number.** Only a *proved* phone matches (an unverified number can
+  be claimed by several accounts); anything else goes to suspense for an operator.
+- URLs `/hooks/c2b/{secret}/validate` and `/confirm` (C2B URL registration refuses paths containing "mpesa").
+  Validation rejects unknown accounts, restricted players, deposits over a limit and bad amounts. A confirmation is
+  stored and verified with Daraja's **Transaction Status API** before it is credited (ADR 0006), through the same
+  credit path as STK top-ups.
+- **Needs from the owner:** the sandbox **initiator name and password** (Test Credentials page) for Transaction Status.
+
+## Owner items open at the end of the session
+
+- **Render auto-deploy and Blueprint sync broke when the repository was recreated**: merges no longer deploy. Reconnect
+  `itsivali/lottery-platform` on the `lottery-api` service and re-sync the Blueprint in the dashboard. Until then
+  deploys are triggered by hand (Render API, deploy of the `main` commit).
+- PR "release 1.0.0" (release-please) is **held** by the owner's decision; do not merge.
+- Dependabot PRs: being merged one at a time; a GitHub Actions incident on 2026-10-22 left some CI runs stuck — rerun
+  and merge the rest (the `actions/checkout` 7 bump showed one unexplained failure during the incident; recheck).
+- Trusted-proxy probe 2 from a second network; rotate the Render API key and the Daraja consumer secret.
 
 ## Next steps
 
