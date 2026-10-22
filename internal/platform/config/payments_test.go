@@ -34,6 +34,18 @@ func TestPayments_OffWhenNoDarajaCredentialsAreSet(t *testing.T) {
 	}
 }
 
+func TestPayments_AGeneratedCallbackTokenAloneLeavesPaymentsOff(t *testing.T) {
+	fullAPIEnv(t)
+	for _, k := range darajaVars {
+		t.Setenv(k, "")
+	}
+	t.Setenv("DARAJA_CALLBACK_TOKEN", "generated-by-the-host-0123456789abcdef")
+	cfg, err := config.Load()
+	if err != nil || cfg.Payments.Enabled {
+		t.Fatalf("enabled=%v err=%v; the host generates the token before anyone enters credentials", cfg.Payments.Enabled, err)
+	}
+}
+
 func TestPayments_EnabledDefaultsToTheSandboxAndAnUnguessableCallbackPath(t *testing.T) {
 	fullPaymentsEnv(t)
 	cfg, err := config.Load()
