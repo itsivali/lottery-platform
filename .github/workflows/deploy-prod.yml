@@ -1,7 +1,13 @@
 name: deploy-prod
+# Production deploys of the Render Blueprint services (render.yaml). Render builds those services from this repository,
+# so a release asks Render to deploy the tagged commit and waits until it is live and ready. The signed ghcr images are
+# release artifacts, not what Render runs.
 on:
   push:
     tags: ["v*.*.*"]
+  # Rollback: "Run workflow" with an earlier release tag selected under "Use workflow from" (the production
+  # environment only accepts tag refs).
+  workflow_dispatch:
 permissions:
   contents: read
 concurrency:
@@ -11,42 +17,49 @@ jobs:
   deploy:
     runs-on: ubuntu-24.04
     environment: production   # required reviewer: @itsivali; tags only
-    permissions:
-      contents: read
-      packages: read
-      id-token: write
     env:
-      VERSION: ${{ github.ref_name }}
+      TAG: ${{ github.ref_name }}
+      RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+      RENDER_API_SERVICE_IDS: ${{ secrets.RENDER_API_SERVICE_IDS }}
+      HEALTH_URL: https://lottery-api-7jmj.onrender.com/readyz
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - uses: sigstore/cosign-installer@3454372f43399081ed03b604cb2d021dabca52bb # v3.8.2
-      - name: Verify signed images exist for this tag
+        with: { fetch-depth: 0 }
+      - name: Resolve the release commit
+        id: commit
         run: |
-          v="${VERSION#v}"
-          for n in api worker lotteryctl; do
-            cosign verify "ghcr.io/itsivali/lottery-platform/$n:$v" \
-              --certificate-identity-regexp '^https://github.com/itsivali/lottery-platform/' \
-              --certificate-oidc-issuer https://token.actions.githubusercontent.com >/dev/null
-          done
-      - name: Point Render services at the signed image
+          [[ "$GITHUB_REF_TYPE" == tag && "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "not a release tag: $TAG"; exit 1; }
+          sha=$(git rev-list -n 1 "refs/tags/$TAG")
+          git merge-base --is-ancestor "$sha" origin/main || { echo "$TAG is not on main"; exit 1; }
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+      - name: Deploy the tagged commit on Render
         env:
-          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
-          RENDER_API_SERVICE_IDS: ${{ secrets.RENDER_API_SERVICE_IDS }}
+          SHA: ${{ steps.commit.outputs.sha }}
         run: |
-          v="${VERSION#v}"
-          for svc in $(echo "$RENDER_API_SERVICE_IDS" | jq -r 'to_entries[] | "\(.key)=\(.value)"'); do
-            name=${svc%%=*}; id=${svc#*=}
-            case "$name" in api|worker*) img=$name; [[ $name == worker* ]] && img=worker;; *) continue;; esac
-            curl -fsS -X PATCH "https://api.render.com/v1/services/$id" \
-              -H "Authorization: Bearer $RENDER_API_KEY" -H 'Content-Type: application/json' \
-              -d "{\"image\":{\"imagePath\":\"ghcr.io/itsivali/lottery-platform/$img:$v\"}}"
-            curl -fsS -X POST "https://api.render.com/v1/services/$id/deploys" \
-              -H "Authorization: Bearer $RENDER_API_KEY" -H 'Content-Type: application/json' -d '{}'
+          api=https://api.render.com/v1
+          auth=(-H "Authorization: Bearer $RENDER_API_KEY" -H 'Content-Type: application/json')
+          for entry in $(echo "$RENDER_API_SERVICE_IDS" | jq -r 'to_entries[] | "\(.key)=\(.value)"'); do
+            name=${entry%%=*}; id=${entry#*=}
+            deploy=$(curl -fsS -X POST "$api/services/$id/deploys" "${auth[@]}" -d "{\"commitId\":\"$SHA\"}" | jq -r .id)
+            echo "$name: deploy $deploy of ${SHA:0:7}"
+            for _ in $(seq 1 60); do
+              status=$(curl -fsS "$api/services/$id/deploys/$deploy" "${auth[@]}" | jq -r .status)
+              case "$status" in
+                live) echo "$name: live"; break ;;
+                build_failed|update_failed|pre_deploy_failed|canceled|deactivated) echo "$name: $status"; exit 1 ;;
+              esac
+              sleep 15
+            done
+            [ "$status" = live ] || { echo "$name: not live after 15 minutes (last status $status)"; exit 1; }
           done
+      - name: Check readiness
+        run: |
+          for _ in $(seq 1 20); do curl -fsS "$HEALTH_URL" && exit 0; sleep 6; done
+          echo "readiness check failed"; exit 1
       - name: Summary and rollback
         run: |
           {
-            echo "### Deployed $VERSION"
-            echo "The api applies migrations on start (MIGRATE_ON_START, advisory-locked) and Render waits for /healthz."
-            echo "Rollback: re-run this workflow for the previous tag (or redeploy the previous tag in Render)."
+            echo "### Deployed $TAG (${{ steps.commit.outputs.sha }})"
+            echo "Render built the tagged commit; the api applied migrations on start (MIGRATE_ON_START, advisory-locked)."
+            echo "Rollback: Run workflow from an earlier release tag. Migrations are forward-only."
           } >> "$GITHUB_STEP_SUMMARY"
