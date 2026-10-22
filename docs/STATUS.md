@@ -5,8 +5,11 @@ Read this first at the start of every session.
 - **Phase:** 1 — Foundations: complete. **Phase 2 — Payments: in progress** (plan and progress in
   `docs/checkpoints/phase-2.md`). Slice 1 (Daraja client + mock, #26) and slice 2 (STK top-up end to end, ADR 0006,
   #27) are merged. Next: slice 3 (C2B).
-- **Repo state:** `main` is green as of PR #27. On 2026-10-22 `main` was force-pushed once by the owner to drop
-  co-author trailers from #26 (same tree). Commits and PRs carry only the owner's name.
+- **Repo state:** the GitHub repository was **deleted and recreated on 2026-10-22** (to drop co-author attribution that
+  GitHub kept in old PR refs and caches) and `main` was pushed from the local clone. PR numbers cited in these docs
+  (#12-#30) refer to the deleted repository. Commits and PRs carry only the owner's name.
+- **Deploy note:** the deploys of #27/#28 failed (a generated `DARAJA_CALLBACK_TOKEN` alone counted as half-configured
+  payments); fixed in #29, which added a test that loads the config exactly as a fresh Blueprint deploy provides it.
 - **Deployed (verified 2026-10-22):** Render Blueprint `lottery-platfform` is in sync with `main`. `lottery-api`
   (`https://lottery-api-7jmj.onrender.com`, free, Oregon) is live at `56bcbaf`; `/healthz` and `/readyz` answer 200; `/v1`
   is enabled; migrations at version 14. Free Postgres (`lottery-db`, PG 18) and Key Value (`lottery-cache`) are available.
@@ -45,8 +48,9 @@ Read this first at the start of every session.
 
 ## Next steps
 
-1. In the Render dashboard set `DARAJA_CONSUMER_KEY`, `DARAJA_CONSUMER_SECRET`, `DARAJA_SHORTCODE` (174379) and
-   `DARAJA_PASSKEY` (the sandbox values) to switch top-ups on (until then they answer 503). Then slice 3 (C2B).
+1. Slice 3 (C2B). Sandbox top-ups are live (2026-10-22): the Daraja sandbox credentials are set on Render and the api
+   logs `payments=true`. The owner's test account (0796992457) is KYC-verified with provider
+   `owner-attested-2026-10-22` (no registry vendor yet); its phone is proved by its first approved top-up prompt.
 2. Fix the trusted-proxy header (above) and re-run both probes.
 3. Owner: choose the national-registry (IPRS) provider.
 4. Later: password reset (STK proof + ID match), passkeys/TOTP, real Play Integrity / App Attest verifiers, nightly
