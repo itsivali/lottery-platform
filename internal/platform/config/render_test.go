@@ -149,7 +149,7 @@ func TestRenderBlueprint_TrustedProxySettingsFindTheRealClientInMeasuredRequests
 		}
 	}
 	measured := map[string]map[string]string{
-		"plain": {"X-Forwarded-For": "102.22.214.70, 104.22.30.137, 10.31.213.134", "True-Client-IP": "102.22.214.70", "CF-Connecting-IP": "102.22.214.70"},
+		"plain":      {"X-Forwarded-For": "102.22.214.70, 104.22.30.137, 10.31.213.134", "True-Client-IP": "102.22.214.70", "CF-Connecting-IP": "102.22.214.70"},
 		"forged xff": {"X-Forwarded-For": "9.9.9.9,102.22.214.70, 172.71.147.220, 10.31.213.134", "True-Client-IP": "102.22.214.70", "CF-Connecting-IP": "102.22.214.70"},
 	}
 	for name, hdrs := range measured {
