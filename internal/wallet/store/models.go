@@ -268,6 +268,15 @@ type PaymentsPayment struct {
 	CreatedAt          pgtype.Timestamptz
 	UpdatedAt          pgtype.Timestamptz
 	ResultCode         pgtype.Int4
+	ReversedAt         pgtype.Timestamptz
+	ReversalReason     *string
+}
+
+type PaymentsReconciliationRun struct {
+	ID     string
+	RanAt  pgtype.Timestamptz
+	Ok     bool
+	Report []byte
 }
 
 type PaymentsStkOrphanCallback struct {

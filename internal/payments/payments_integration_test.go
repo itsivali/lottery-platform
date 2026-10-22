@@ -684,3 +684,218 @@ func TestJobs_FailClosedWhenDarajaIsNotConfigured(t *testing.T) {
 		t.Fatalf("verify: %v", err)
 	}
 }
+
+// spend takes amount out of the player's wallet the way a play would (phase 3), so reversals can find it spent.
+func (e *env) spend(t *testing.T, user string, amount int64) {
+	t.Helper()
+	p, err := ledger.Stake(fmt.Sprintf("00000000-0000-7000-8000-%012d", seq.Add(1)), user, amount)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := pgx.BeginFunc(context.Background(), e.pool, func(tx pgx.Tx) error {
+		_, err := wallet.NewService(ledger.NewStore()).Apply(context.Background(), tx, p)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func (e *env) debt(t *testing.T, user string) int64 {
+	t.Helper()
+	var d int64
+	if err := pgx.BeginFunc(context.Background(), e.pool, func(tx pgx.Tx) error {
+		var err error
+		d, err = wallet.NewService(ledger.NewStore()).Debt(context.Background(), tx, user)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return d
+}
+
+func (e *env) receipt(t *testing.T, id string) string {
+	t.Helper()
+	var r string
+	if err := e.pool.QueryRow(context.Background(), `SELECT mpesa_receipt FROM payments.payments WHERE id = $1`, id).Scan(&r); err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
+
+func TestReverse_TakesBackWhatThePlayerReceivedBooksTheRestAsDebtAndTheNextTopUpRecoversIt(t *testing.T) {
+	e := setup(t)
+	ctx := context.Background()
+	user, _ := e.player(t)
+	first := e.topUp(t, user, 100)
+	e.pushAndComplete(t) // credited 95 (5 excise deducted)
+	e.spend(t, user, 60) // 35 left
+
+	res, err := e.svc.Reverse(ctx, e.receipt(t, first.ID), "customer dispute upheld by Safaricom", "operator:test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.PaymentID != first.ID || res.UserID != user || res.TakenKES != 35 || res.DebtKES != 60 {
+		t.Fatalf("reversal = %+v, want 35 taken and 60 owed", res)
+	}
+	if st, _ := e.status(t, first.ID); st != "reversed" || e.balance(t, user) != 0 || e.debt(t, user) != 60 {
+		t.Fatalf("after reversal: status %s balance %d debt %d", st, e.balance(t, user), e.debt(t, user))
+	}
+	if got := e.get(t, user, first.ID); got.Status != payments.StatusReversed {
+		t.Fatalf("player sees %q", got.Status)
+	}
+
+	e.topUp(t, user, 100) // credited 95, of which 60 repays the debt
+	e.pushAndComplete(t)
+	if b, d := e.balance(t, user), e.debt(t, user); b != 35 || d != 0 {
+		t.Fatalf("after the next top-up: balance %d debt %d, want 35 and 0", b, d)
+	}
+}
+
+func TestReverse_IsRefusedForUnknownUncreditedOrAlreadyReversedPayments(t *testing.T) {
+	e := setup(t)
+	ctx := context.Background()
+	if _, err := e.svc.Reverse(ctx, "NOSUCHRCPT", "x", "operator:test"); !errors.Is(err, payments.ErrNotFound) {
+		t.Fatalf("unknown receipt: %v", err)
+	}
+	user, _ := e.player(t)
+	tu := e.topUp(t, user, 100)
+	e.pushAndComplete(t)
+	r := e.receipt(t, tu.ID)
+	if _, err := e.svc.Reverse(ctx, r, "", "operator:test"); !errors.Is(err, payments.ErrReasonRequired) {
+		t.Fatalf("no reason: %v", err)
+	}
+	if _, err := e.svc.Reverse(ctx, r, "dispute", "operator:test"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.svc.Reverse(ctx, r, "dispute", "operator:test"); !errors.Is(err, payments.ErrNotReversible) {
+		t.Fatalf("second reversal: %v", err)
+	}
+	var audits int
+	if err := e.pool.QueryRow(ctx, `SELECT count(*) FROM audit.audit_log WHERE action = 'payment.topup.reversed' AND actor_type = 'staff' AND actor_id = 'operator:test'`).Scan(&audits); err != nil || audits != 1 {
+		t.Fatalf("audit rows = %d %v", audits, err)
+	}
+}
+
+func TestResolveUnconfirmed_CreditsFromTheStatementReceiptExactlyOnce(t *testing.T) {
+	e := setup(t)
+	ctx := context.Background()
+	user, _ := e.player(t)
+	e.mock.SetNextFault(darajamock.Fault{DropCallback: true})
+	tu := e.topUp(t, user, 100)
+	e.pushAndComplete(t)
+	e.clk.Advance(payments.DefaultExpiry + time.Second)
+	if _, err := e.svc.Verify(ctx, tu.ID); err != nil {
+		t.Fatal(err)
+	}
+	if st, _ := e.status(t, tu.ID); st != "unconfirmed" {
+		t.Fatalf("status = %s", st)
+	}
+
+	for _, amt := range []int64{0, -5, daraja.MaxSTKAmountKES + 1} {
+		if err := e.svc.ResolveUnconfirmed(ctx, tu.ID, "STMT0001", amt, "operator:test"); !errors.Is(err, payments.ErrInvalidAmount) {
+			t.Fatalf("amount %d: %v", amt, err)
+		}
+	}
+	if err := e.svc.ResolveUnconfirmed(ctx, tu.ID, "STMT0001", 100, "operator:test"); err != nil {
+		t.Fatal(err)
+	}
+	if got := e.get(t, user, tu.ID); got.Status != payments.StatusCredited || e.balance(t, user) != 95 || !e.phoneVerified(t, user) {
+		t.Fatalf("payment %+v balance %d phone %v", got, e.balance(t, user), e.phoneVerified(t, user))
+	}
+	if err := e.svc.ResolveUnconfirmed(ctx, tu.ID, "STMT0001", 100, "operator:test"); !errors.Is(err, payments.ErrNotResolvable) {
+		t.Fatalf("second resolve: %v", err)
+	}
+
+	// a receipt that already credited a payment cannot credit another
+	other, _ := e.player(t)
+	e.mock.SetNextFault(darajamock.Fault{DropCallback: true})
+	tu2 := e.topUp(t, other, 100)
+	e.pushAndComplete(t)
+	e.clk.Advance(payments.DefaultExpiry + time.Second)
+	if _, err := e.svc.Verify(ctx, tu2.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.svc.ResolveUnconfirmed(ctx, tu2.ID, "STMT0001", 100, "operator:test"); !errors.Is(err, payments.ErrReceiptUsed) {
+		t.Fatalf("reused receipt: %v", err)
+	}
+	if err := e.svc.ResolveUnconfirmed(ctx, "0192f000-0000-7000-8000-000000000000", "STMT0002", 100, "operator:test"); !errors.Is(err, payments.ErrNotFound) {
+		t.Fatalf("unknown payment: %v", err)
+	}
+}
+
+func (e *env) reconcile(t *testing.T) payments.Report {
+	t.Helper()
+	r, err := e.svc.Reconcile(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
+
+func TestReconcile_IsCleanAfterNormalTrafficAndListsWhatNeedsAnOperator(t *testing.T) {
+	e := setup(t)
+	ctx := context.Background()
+	if r := e.reconcile(t); !r.OK || len(r.Mismatches) != 0 {
+		t.Fatalf("empty database: %+v", r)
+	}
+	a, _ := e.player(t)
+	paid := e.topUp(t, a, 100)
+	e.pushAndComplete(t)
+	e.spend(t, a, 90)
+	if _, err := e.svc.Reverse(ctx, e.receipt(t, paid.ID), "dispute", "operator:test"); err != nil { // leaves debt
+		t.Fatal(err)
+	}
+	b, _ := e.player(t)
+	e.mock.SetNextFault(darajamock.Fault{DropCallback: true})
+	lost := e.topUp(t, b, 50)
+	e.pushAndComplete(t)
+	e.clk.Advance(payments.DefaultExpiry + time.Second)
+	if _, err := e.svc.Verify(ctx, lost.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.svc.HandleCallback(ctx, []byte(`{"Body":{"stkCallback":{"CheckoutRequestID":"ws_CO_orphan","ResultCode":1032,"ResultDesc":"x"}}}`)); err != nil {
+		t.Fatal(err)
+	}
+
+	r := e.reconcile(t)
+	if !r.OK || len(r.Mismatches) != 0 {
+		t.Fatalf("normal traffic produced mismatches: %+v", r.Mismatches)
+	}
+	if got := r.Attention["unconfirmed"]; len(got) != 1 || got[0] != lost.ID {
+		t.Fatalf("unconfirmed = %v", got)
+	}
+	if got := r.Attention["orphan_callbacks"]; len(got) != 1 || got[0] != "ws_CO_orphan" {
+		t.Fatalf("orphans = %v", got)
+	}
+	if got := r.Attention["players_in_debt"]; len(got) != 1 || got[0] != a {
+		t.Fatalf("debtors = %v", got)
+	}
+	if r.Totals["clearing_kes"] != 0 || r.Totals["credited_kes"] != 0 || r.Totals["debt_kes"] != 90 {
+		t.Fatalf("totals = %v (the only credited top-up was reversed: 95 received, 90 spent, 5 taken back, 90 owed)", r.Totals)
+	}
+}
+
+func TestReconcile_FindsACreditedPaymentTheLedgerNeverSaw(t *testing.T) {
+	e := setup(t)
+	ctx := context.Background()
+	user, msisdn := e.player(t)
+	var id string
+	if err := e.pool.QueryRow(ctx, `INSERT INTO payments.payments (user_id, channel, status, amount_requested_kes, amount_confirmed_kes,
+		msisdn, mpesa_receipt, idempotency_key) VALUES ($1, 'stk', 'credited', 100, 100, $2, 'GHOST1', 'k') RETURNING id::text`, user, msisdn).Scan(&id); err != nil {
+		t.Fatal(err)
+	}
+	r := e.reconcile(t)
+	if r.OK {
+		t.Fatal("a credit without a deposit journal passed reconciliation")
+	}
+	if got := r.Mismatches["credited_without_deposit"]; len(got) != 1 || got[0] != id {
+		t.Fatalf("credited_without_deposit = %v", got)
+	}
+	if got := r.Mismatches["clearing_vs_credited"]; len(got) != 1 {
+		t.Fatalf("clearing_vs_credited = %v", got)
+	}
+	var stored int
+	if err := e.pool.QueryRow(ctx, `SELECT count(*) FROM payments.reconciliation_runs WHERE NOT ok`).Scan(&stored); err != nil || stored != 1 {
+		t.Fatalf("stored failing runs = %d %v", stored, err)
+	}
+}

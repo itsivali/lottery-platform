@@ -43,7 +43,8 @@ Read this first at the start of every session.
 
 ## Next steps
 
-1. Phase 2 without a paybill: reconciliation and reversals, realtime confirmation. Sandbox top-ups are live (2026-10-22): the Daraja sandbox credentials are set on Render and the api
+1. Phase 2 without a paybill: slice 4 (reversals, player debt, internal reconciliation; ADR 0007) is done; next
+   realtime confirmation (slice 5). Sandbox top-ups are live (2026-10-22): the Daraja sandbox credentials are set on Render and the api
    logs `payments=true`. The owner's test account (0796992457) is KYC-verified with provider
    `owner-attested-2026-10-22` (no registry vendor yet); its phone is proved by its first approved top-up prompt.
 2. Owner: run trusted-proxy probe 2 from a second network.

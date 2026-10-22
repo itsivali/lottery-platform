@@ -212,19 +212,27 @@ func WithdrawalFailed(payoutID, user string, amount int64, tax TaxRule) (Posting
 		d(B2CFloat, amount-t, ""), d(TaxPayable, t, ""), c(WalletLiability, amount, user))
 }
 
-// DepositReversal claws back a credited top-up that M-Pesa reversed. The wallet gives back what it can cover; any
-// shortfall becomes player debt (play and withdrawals are then suspended by the caller).
-func DepositReversal(paymentID, user string, gross, walletBalance int64) (Posting, error) {
+// DepositReversal claws back a credited top-up that M-Pesa reversed: M-Pesa takes back the gross, the player gives
+// back what they received (gross minus the excise deducted from the credit), and the excise already owed to KRA
+// becomes the operator's cost (whether excise is refundable on a reversed deposit is an open tax question). The wallet
+// gives back what it can cover; any shortfall becomes player debt, booked against the player so it can be totalled
+// and recovered (DebtRecovery); play and withdrawals are suspended by the caller while it is owed.
+func DepositReversal(paymentID, user string, gross, exciseDeducted, walletBalance int64) (Posting, error) {
 	if err := positive(gross); err != nil {
 		return Posting{}, err
+	}
+	if exciseDeducted < 0 || exciseDeducted > gross {
+		return Posting{}, errors.New("ledger: excise out of range")
 	}
 	if walletBalance < 0 {
 		return Posting{}, errors.New("ledger: negative wallet balance")
 	}
-	taken := min(walletBalance, gross)
-	shortfall := gross - taken
+	received := gross - exciseDeducted
+	taken := min(walletBalance, received)
+	shortfall := received - taken
 	return build("deposit_reversal", "payment", paymentID, user, []WalletTx{{Kind: "reversal", AmountKES: -taken}},
-		d(WalletLiability, taken, user), d(PlayerDebt, shortfall, ""), c(MpesaClearing, gross, ""))
+		d(WalletLiability, taken, user), d(PlayerDebt, shortfall, user), d(ExciseExpense, exciseDeducted, ""),
+		c(MpesaClearing, gross, ""))
 }
 
 // PrizePayout pays a draw prize out of the prize pool via B2C; it does not pass through the wallet.
@@ -242,4 +250,14 @@ func PrizePayout(payoutID, drawType string, gross int64, tax TaxRule) (Posting, 
 	}
 	return build("prize_payout", "payout", payoutID, "", nil,
 		d(pool, gross, ""), c(B2CFloat, gross-t, ""), c(TaxPayable, t, ""))
+}
+
+// DebtRecovery takes back, from a later deposit, money a player owes after a reversal. It is keyed on the payment
+// whose deposit funds it, so each deposit recovers at most once.
+func DebtRecovery(paymentID, user string, amount int64) (Posting, error) {
+	if err := positive(amount); err != nil {
+		return Posting{}, err
+	}
+	return build("debt_recovery", "payment", paymentID, user, []WalletTx{{Kind: "debt_recovery", AmountKES: -amount}},
+		d(WalletLiability, amount, user), c(PlayerDebt, amount, user))
 }
