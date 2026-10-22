@@ -53,15 +53,19 @@ func TestAllow_KeysAreIndependent(t *testing.T) {
 func TestAllow_WindowSlides(t *testing.T) {
 	l := ratelimit.New(testvalkey.Start(t).Client(t))
 	ctx := context.Background()
-	if d, _ := l.Allow(ctx, "k", 1, 300*time.Millisecond); !d.Allowed {
-		t.Fatal("first request refused")
+	// The window must comfortably exceed the time between the first two calls: the first one also opens the
+	// connection and loads the script, which under load took longer than the 300ms window this test used to have,
+	// so the second request landed in a fresh window and was (correctly) allowed.
+	const window = 2 * time.Second
+	if d, err := l.Allow(ctx, "k", 1, window); err != nil || !d.Allowed {
+		t.Fatalf("first request refused: %v", err)
 	}
-	if d, _ := l.Allow(ctx, "k", 1, 300*time.Millisecond); d.Allowed {
-		t.Fatal("second request inside the window allowed")
+	if d, err := l.Allow(ctx, "k", 1, window); err != nil || d.Allowed {
+		t.Fatalf("second request inside the window allowed (err %v)", err)
 	}
-	deadline := time.Now().Add(5 * time.Second) //nolint:forbidigo // test polling deadline
+	deadline := time.Now().Add(10 * time.Second) //nolint:forbidigo // test polling deadline
 	for {
-		if d, _ := l.Allow(ctx, "k", 1, 300*time.Millisecond); d.Allowed {
+		if d, _ := l.Allow(ctx, "k", 1, window); d.Allowed {
 			return
 		}
 		if time.Now().After(deadline) { //nolint:forbidigo // test polling deadline

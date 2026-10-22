@@ -1,4 +1,4 @@
-// Command stub serves a named placeholder mock (kyc, sms, drand) for local Compose.
+// Command stub serves a named placeholder mock (kyc, drand) for local Compose.
 package main
 
 import (

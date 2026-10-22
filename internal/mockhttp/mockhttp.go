@@ -1,5 +1,5 @@
-// Package mockhttp is a tiny canned-response server used for the Phase 0 local mocks.
-// Real fault-injecting mocks replace it in later phases.
+// Package mockhttp is a tiny canned-response server for the local placeholder mocks (kyc, drand). Mocks that need
+// behaviour, such as Daraja (internal/payments/darajamock), have their own packages.
 package mockhttp
 
 import (
@@ -24,8 +24,8 @@ func Handler(name string, routes map[string]string) http.Handler {
 	return mux
 }
 
-// LogRequests wraps h and reports "METHOD path body" for every request except health checks. It exists so a developer
-// can read the one-time code the SMS mock was asked to send; it is for local mocks only.
+// LogRequests wraps h and reports "METHOD path body" for every request except health checks, so a developer can see
+// what the api sent to a local mock; it is for local mocks only.
 func LogRequests(h http.Handler, logf func(string)) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/healthz" {

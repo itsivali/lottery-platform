@@ -47,6 +47,6 @@ jobs:
         run: |
           {
             echo "### Deployed $VERSION"
-            echo "Render runs \`goose up\` as the pre-deploy command and waits for /readyz."
+            echo "The api applies migrations on start (MIGRATE_ON_START, advisory-locked) and Render waits for /healthz."
             echo "Rollback: re-run this workflow for the previous tag (or redeploy the previous tag in Render)."
           } >> "$GITHUB_STEP_SUMMARY"

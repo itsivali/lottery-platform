@@ -20,8 +20,8 @@ func (s *Service) verifyIDToken(ctx context.Context, provider, idToken, nonce st
 	return sub, nil
 }
 
-// SignInSSO signs in an already-linked Google or Apple identity. An unlinked identity must first sign in by phone
-// OTP, complete KYC and then link (SSO never creates an account).
+// SignInSSO signs in an already-linked Google or Apple identity. An unlinked identity must first sign in with phone
+// and password, complete KYC and then link (SSO never creates an account).
 func (s *Service) SignInSSO(ctx context.Context, provider, idToken, nonce string, dev Device) (Tokens, error) {
 	sub, err := s.verifyIDToken(ctx, provider, idToken, nonce)
 	if err != nil {
