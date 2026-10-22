@@ -87,7 +87,7 @@ func TestJobs_ATopUpIsSettledByTheQueueAlone(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = wc.Stop(context.Background()) })
 
-	var user, msisdn string = "", "254700000999"
+	user, msisdn := "", "254700000999"
 	if err := pool.QueryRow(ctx, `INSERT INTO identity.users (msisdn, kyc_status, national_id_hash, password_hash)
 		VALUES ($1, 'verified', 'jobs-test', 'x') RETURNING id::text`, msisdn).Scan(&user); err != nil {
 		t.Fatal(err)
