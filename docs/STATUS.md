@@ -2,34 +2,29 @@
 
 Read this first at the start of every session.
 
-- **Phase:** 1 — Foundations: complete. **Phase 2 — Payments: in progress** (plan and progress in
-  `docs/checkpoints/phase-2.md`). Slice 1 (Daraja client + mock, #26) and slice 2 (STK top-up end to end, ADR 0006,
-  #27) are merged. Next: slice 3 (C2B).
+- **Phase:** 1 — Foundations: complete. **Phase 2 — Payments: in progress** (`docs/checkpoints/phase-2.md`). Slices 1
+  (Daraja client + mock) and 2 (STK top-up end to end, ADR 0006) are merged and live. **Slice 3 (C2B) waits for a real
+  paybill** (owner, 2026-10-22); reconciliation/reversals and realtime confirmation can proceed without it.
 - **Repo state:** the GitHub repository was **deleted and recreated on 2026-10-22** (to drop co-author attribution that
-  GitHub kept in old PR refs and caches) and `main` was pushed from the local clone. PR numbers cited in these docs
-  (#12-#30) refer to the deleted repository. Commits and PRs carry only the owner's name.
-- **Deploy note:** the deploys of #27/#28 failed (a generated `DARAJA_CALLBACK_TOKEN` alone counted as half-configured
-  payments); fixed in #29, which added a test that loads the config exactly as a fresh Blueprint deploy provides it.
-- **Deployed (verified 2026-10-22):** Render Blueprint `lottery-platfform` is in sync with `main`. `lottery-api`
-  (`https://lottery-api-7jmj.onrender.com`, free, Oregon) is live at `56bcbaf`; `/healthz` and `/readyz` answer 200; `/v1`
-  is enabled; migrations at version 14. Free Postgres (`lottery-db`, PG 18) and Key Value (`lottery-cache`) are available.
-- **`DATA_KEY` and `IDENTITY_KEY` were handed to the owner for the password manager on 2026-10-22.** `AUTH_KEY` should be
-  saved too (copy it from the dashboard).
+  GitHub kept in old PR refs and caches) and `main` was pushed from the local clone. PR numbers below #8 in these docs
+  refer to the deleted repository. Commits and PRs carry only the owner's name.
+- **Deployed (verified 2026-10-22):** Blueprint `lottery-platfform`; `lottery-api` (`https://lottery-api-7jmj.onrender.com`,
+  free, Oregon) builds from `main`; migrations at version 15; sandbox top-ups on (`payments=true`); client address from
+  `CF-Connecting-IP`. Free Postgres `lottery-db` (PG 18) and Key Value `lottery-cache`.
+- **Keys:** `DATA_KEY` and `IDENTITY_KEY` were handed to the owner for the password manager; save `AUTH_KEY` too.
 
-## Blocking before the API is exposed to players
+## Before the API is exposed to players
 
-1. **Trusted-proxy probe 1 FAILED (2026-10-22).** 61 logins with distinct forged `X-Forwarded-For` values all returned
-   `401`; none hit the per-IP limit. The rightmost entry is therefore not a stable client address: either Render passes
-   the client's header through unchanged (spoofable) or the rightmost entry is a rotating proxy address. Per the runbook,
-   do not expose the API until this is fixed. Options: (a) find the header Render/Cloudflare sets that a client cannot
-   forge (e.g. `CF-Connecting-IP`, `True-Client-IP`), confirm it by temporarily logging the headers, then set
-   `TRUSTED_PROXY_HEADER` to it and re-run both probes; (b) as a stop-gap, `TRUSTED_PROXY_HEADER=none` (all clients share
-   one per-IP budget: safe but coarse; the config test currently forbids it in `render.yaml`).
-2. **The free Postgres expires on 2026-11-20** (Render deletes free databases after 30 days). Upgrade or re-create it
-   before then; anything stored is lost otherwise.
-3. Run the two queries in `docs/runbooks/database-roles.md` (single-role mode or not); the deploy logs show no warning,
-   but that is not proof.
-4. Delete the stale `OTP_KEY` env var on the Render service (unused since ADR 0005).
+1. **Trusted proxy: fixed.** Measured on the live service (`docs/runbooks/trusted-proxy.md`): the rightmost
+   `X-Forwarded-For` entry was a rotating Render balancer address; the api now reads `CF-Connecting-IP`, which
+   Cloudflare refuses to accept from clients. **Probe 1 passed** (60 × 401 then 429 with forged `X-Forwarded-For`).
+   Remaining: **probe 2** from a second network (5 failed logins from a phone on mobile data must all be 401, not 429).
+2. **Free Postgres:** expires 2026-11-20. **Automated** by `db-rotate` (`docs/runbooks/free-database-rotation.md`): daily
+   check, rotation (backup, verify, recreate, restore, switch) when 3 days or fewer remain. **Needs the `database`
+   environment secrets `RENDER_API_KEY` and `DB_BACKUP_PASSPHRASE`**, then a manual `dry-run` once. Upgrading the
+   database to a paid plan ends the need for it.
+3. **Database roles:** answered. Render's user has `CREATEROLE` and the four app roles exist (role mode). After the
+   first rotation the restored instance runs in single-role mode (documented in the rotation runbook).
 
 ## Decisions taken (see ADR 0005)
 
@@ -48,10 +43,10 @@ Read this first at the start of every session.
 
 ## Next steps
 
-1. Slice 3 (C2B). Sandbox top-ups are live (2026-10-22): the Daraja sandbox credentials are set on Render and the api
+1. Phase 2 without a paybill: reconciliation and reversals, realtime confirmation. Sandbox top-ups are live (2026-10-22): the Daraja sandbox credentials are set on Render and the api
    logs `payments=true`. The owner's test account (0796992457) is KYC-verified with provider
    `owner-attested-2026-10-22` (no registry vendor yet); its phone is proved by its first approved top-up prompt.
-2. Fix the trusted-proxy header (above) and re-run both probes.
+2. Owner: set the `database` environment secrets, run `db-rotate` with `dry-run`, and run trusted-proxy probe 2.
 3. Owner: choose the national-registry (IPRS) provider.
 4. Later: password reset (STK proof + ID match), passkeys/TOTP, real Play Integrity / App Attest verifiers, nightly
    mutation testing of the integration-backed packages.
