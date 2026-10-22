@@ -19,6 +19,9 @@ type Config struct {
 	WorkersInProcess bool
 	// MigrateOnStart applies pending migrations when the api starts (for hosts without a pre-deploy command).
 	MigrateOnStart bool
+	// LogClientIPHeaders logs each request's address headers: a short-lived diagnostic for choosing
+	// TRUSTED_PROXY_HEADER (docs/runbooks/trusted-proxy.md).
+	LogClientIPHeaders bool
 	// API configures the public /v1 API (disabled unless its secrets are present).
 	API API
 	// Payments configures M-Pesa top-ups (disabled unless the Daraja credentials are present).
@@ -44,6 +47,7 @@ func Load() (Config, error) {
 	}
 	cfg.WorkersInProcess = os.Getenv("WORKERS_IN_PROCESS") == "true"
 	cfg.MigrateOnStart = os.Getenv("MIGRATE_ON_START") == "true"
+	cfg.LogClientIPHeaders = os.Getenv("LOG_CLIENT_IP_HEADERS") == "true"
 	if cfg.MetricsAddr == "off" {
 		cfg.MetricsAddr = ""
 	}

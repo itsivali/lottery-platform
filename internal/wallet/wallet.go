@@ -85,8 +85,9 @@ func (s *Service) Balance(ctx context.Context, tx pgx.Tx, user string) (int64, e
 }
 
 // ReverseDeposit claws back a credited top-up under the wallet row lock, so the amount taken from the wallet and the
-// shortfall booked as player debt are decided from the same balance that is then debited.
-func (s *Service) ReverseDeposit(ctx context.Context, tx pgx.Tx, paymentID, user string, gross int64) (ledger.Posting, int64, error) {
+// shortfall booked as player debt are decided from the same balance that is then debited. exciseDeducted is the
+// excise that was taken out of the original credit (the player never received it).
+func (s *Service) ReverseDeposit(ctx context.Context, tx pgx.Tx, paymentID, user string, gross, exciseDeducted int64) (ledger.Posting, int64, error) {
 	q := store.New(tx)
 	if err := q.EnsureWallet(ctx, user); err != nil {
 		return ledger.Posting{}, 0, fmt.Errorf("wallet: ensure: %w", err)
@@ -95,10 +96,46 @@ func (s *Service) ReverseDeposit(ctx context.Context, tx pgx.Tx, paymentID, user
 	if err != nil {
 		return ledger.Posting{}, 0, fmt.Errorf("wallet: lock: %w", err)
 	}
-	p, err := ledger.DepositReversal(paymentID, user, gross, bal)
+	p, err := ledger.DepositReversal(paymentID, user, gross, exciseDeducted, bal)
 	if err != nil {
 		return ledger.Posting{}, 0, err
 	}
 	newBal, err := s.Apply(ctx, tx, p)
 	return p, newBal, err
+}
+
+// Debt returns what the player owes after reversals (0 when nothing is owed). Play and withdrawals must be refused
+// while it is positive.
+func (s *Service) Debt(ctx context.Context, tx pgx.Tx, user string) (int64, error) {
+	return store.New(tx).PlayerDebt(ctx, user)
+}
+
+// RecoverDebt takes what the player owes out of their wallet, up to the balance, under the wallet row lock. It is
+// keyed on the deposit (paymentID) that funds it and called in the same transaction as that credit, so a deposit
+// recovers at most once. It returns the amount recovered.
+func (s *Service) RecoverDebt(ctx context.Context, tx pgx.Tx, user, paymentID string) (int64, error) {
+	q := store.New(tx)
+	if err := q.EnsureWallet(ctx, user); err != nil {
+		return 0, fmt.Errorf("wallet: ensure: %w", err)
+	}
+	bal, err := q.LockWalletBalance(ctx, user)
+	if err != nil {
+		return 0, fmt.Errorf("wallet: lock: %w", err)
+	}
+	debt, err := q.PlayerDebt(ctx, user)
+	if err != nil {
+		return 0, err
+	}
+	amount := min(debt, bal)
+	if amount <= 0 {
+		return 0, nil
+	}
+	p, err := ledger.DebtRecovery(paymentID, user, amount)
+	if err != nil {
+		return 0, err
+	}
+	if _, err := s.Apply(ctx, tx, p); err != nil {
+		return 0, err
+	}
+	return amount, nil
 }
