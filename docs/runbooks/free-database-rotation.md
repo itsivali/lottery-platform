@@ -57,5 +57,9 @@ gh secret set DB_BACKUP_PASSPHRASE --env database          # paste a long random
 
 - The Blueprint declares `lottery-db` with `fromDatabase`; the workflow sets `DATABASE_URL` explicitly after a rotation.
   After the first real rotation, check the Blueprint still shows as in sync in the dashboard.
-- The script is `scripts/rotate-free-db.sh`; `status` and `backup` were run against the live database on 2026-10-22
-  (38 tables, 120 KB, verified restore, encrypted backup decrypts to the identical dump). `replace` has not run yet.
+- The script is `scripts/rotate-free-db.sh`. History:
+  - 2026-10-22 `dry-run` (Actions run 39776895525): 38 tables verified; the artifact decrypts with the saved passphrase.
+  - 2026-10-22 first `rotate`, supervised (run 39777173649): `dpg-dbcagf2fngtc739irh70-a` → `dpg-dbcvu9ivcj2c73eqb410-a`,
+    3m25s end to end, about 2.5 minutes of api downtime (suspended 12:18:16, ready 12:21:09 UTC); 38 tables with
+    identical row counts; migrations a no-op at version 15; the test account and its KYC record intact; Blueprint
+    still in sync; new instance in single-role mode (no `app_*` roles), all 24 triggers present. New expiry 2026-11-21.
