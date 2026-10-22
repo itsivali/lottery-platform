@@ -41,8 +41,9 @@ Validation/confirmation URLs registered against the paybill; account reference �
 go to `payments.c2b_unmatched` and the `SUSPENSE` account; back-office resolution later.
 
 ### Slice 4 — Reconciliation and reversals
-Daily statement/transaction-status reconciliation against `MPESA_CLEARING`, reversal handling via
-`wallet.ReverseDeposit` (player debt suspends play and withdrawal), reconciliation report.
+Reversal handling via `wallet.ReverseDeposit` (player debt suspends play and withdrawal), manual resolution of
+`unconfirmed` top-ups, a daily internal reconciliation report. Matching against the M-Pesa statement (and the
+Transaction Status API, which needs a receipt) waits for the paybill (slice 3).
 
 ### Slice 5 — Realtime confirmation and checkpoint report
 WebSocket (or SSE) push of top-up results to the app; e2e journey against compose; mutation testing of `payments`.
@@ -91,4 +92,27 @@ Design decisions are in ADR 0006. What landed:
   check, pending treated as paid, payer-number check, push retried). Survivor: removing the final-state re-check
   inside the credit transaction; a double credit is still impossible there because the deposit journal is unique per
   payment (`ledger_journals_event_key`), so the second attempt errors and retries into the final-state check.
+
+### Slice 4 (no paybill: internal reconciliation and reversals)
+Decisions in ADR 0007; operator guide in `docs/runbooks/payments-operations.md`.
+
+- **Reversal rule fixed:** with excise deducted, the phase 1 `DepositReversal` clawed back the gross, charging the
+  player the excise twice. It now takes back what the player received (gross − excise); M-Pesa's gross leaves
+  `MPESA_CLEARING`; the excise already owed becomes `EXCISE_EXPENSE` (refundability is an open tax question).
+- **Per-player debt:** `PLAYER_DEBT` entries carry the user; `wallet.Debt` totals it; `DebtRecovery` takes it back from
+  every later deposit in the credit transaction (keyed on that deposit). Play and withdrawals must check `wallet.Debt`
+  when those phases land.
+- **Operator actions** (`lotteryctl payments reverse|resolve`, audited as staff): reverse a credited top-up by receipt;
+  credit an `unconfirmed` top-up from the statement's receipt and amount through the same credit path (excise, debt
+  recovery, phone proof, receipt used once).
+- **Daily internal reconciliation** (River periodic job + `lotteryctl payments reconcile`, runs stored in
+  `payments.reconciliation_runs`): credited ⇔ deposit journal with the confirmed amount, reversed ⇔ reversal journal,
+  `MPESA_CLEARING` = credited total, `WALLET_LIABILITY` = wallet total; attention list of unconfirmed, overdue pending,
+  orphan callbacks and debtors. Mismatches log at ERROR.
+- Migration `00016`: `debt_recovery` wallet kind, `reversed` payment status (with reason and time), per-player debt
+  index, `payments.reconciliation_runs` (append-only).
+- Tests: ledger (reversal takes back only what was received; debt per player; recovery; property test with random
+  excise), wallet (debt recovered once per deposit across deposits), payments (reversal with spend → debt → recovered
+  by the next top-up; refusals; resolve exactly once per receipt; reconciliation clean after normal traffic and
+  catching a credit the ledger never saw), lotteryctl (parser; reconcile on a fresh database).
 

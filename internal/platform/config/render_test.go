@@ -3,12 +3,16 @@ package config_test
 import (
 	"bytes"
 	"encoding/base64"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"testing"
 
 	"go.yaml.in/yaml/v3"
 
 	"github.com/itsivali/lottery-platform/internal/platform/config"
+	"github.com/itsivali/lottery-platform/internal/platform/httpx"
 )
 
 // The Blueprint must supply everything the API needs to start in full mode, and must make the trusted-proxy decision
@@ -108,5 +112,54 @@ func TestRenderBlueprint_AFreshDeployStarts(t *testing.T) {
 	}
 	if !cfg.API.Enabled || cfg.Payments.Enabled {
 		t.Fatalf("api=%v payments=%v; want the API on and payments off until the Daraja credentials are entered", cfg.API.Enabled, cfg.Payments.Enabled)
+	}
+}
+
+// Headers as Render delivered them to the api on 2026-10-22 (LOG_CLIENT_IP_HEADERS diagnostic, client 102.22.214.70).
+// Whatever the Blueprint's trusted-proxy settings are, they must resolve both requests to the real client: the plain
+// one and the one where the client forged an X-Forwarded-For entry.
+func TestRenderBlueprint_TrustedProxySettingsFindTheRealClientInMeasuredRequests(t *testing.T) {
+	raw, err := os.ReadFile("../../../render.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var bp struct {
+		Services []struct {
+			Type    string `yaml:"type"`
+			EnvVars []struct {
+				Key   string `yaml:"key"`
+				Value string `yaml:"value"`
+			} `yaml:"envVars"`
+		} `yaml:"services"`
+	}
+	if err := yaml.Unmarshal(raw, &bp); err != nil {
+		t.Fatal(err)
+	}
+	header, hops := "", 1
+	for _, s := range bp.Services {
+		for _, e := range s.EnvVars {
+			switch e.Key {
+			case "TRUSTED_PROXY_HEADER":
+				header = e.Value
+			case "TRUSTED_PROXY_HOPS":
+				if _, err := fmt.Sscan(e.Value, &hops); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+	}
+	measured := map[string]map[string]string{
+		"plain":      {"X-Forwarded-For": "102.22.214.70, 104.22.30.137, 10.31.213.134", "True-Client-IP": "102.22.214.70", "CF-Connecting-IP": "102.22.214.70"},
+		"forged xff": {"X-Forwarded-For": "9.9.9.9,102.22.214.70, 172.71.147.220, 10.31.213.134", "True-Client-IP": "102.22.214.70", "CF-Connecting-IP": "102.22.214.70"},
+	}
+	for name, hdrs := range measured {
+		r := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/healthz", nil)
+		r.RemoteAddr = "[::1]:57972"
+		for k, v := range hdrs {
+			r.Header.Set(k, v)
+		}
+		if got := httpx.ClientIPHops(r, header, hops); got != "102.22.214.70" {
+			t.Errorf("%s: header=%s hops=%d resolves the client to %s, want 102.22.214.70", name, header, hops, got)
+		}
 	}
 }

@@ -1,0 +1,100 @@
+name: db-rotate
+# Recreates the Render free Postgres before it expires (scripts/rotate-free-db.sh, docs/runbooks/free-database-rotation.md).
+# Daily at 01:00 Nairobi: rotate when expiry is near. Manual runs: check, dry-run (backup and verify only), rotate,
+# or recover (restore the encrypted backup of a failed run after its old database was already deleted).
+on:
+  schedule:
+    - cron: "0 22 * * *"   # 01:00 EAT
+  workflow_dispatch:
+    inputs:
+      mode:
+        type: choice
+        options: [check, dry-run, rotate, recover]
+        default: check
+      recover_run_id:
+        description: For recover only — the run id whose db-backup artifact to restore
+        required: false
+permissions:
+  contents: read
+  actions: read   # download the backup artifact of an earlier run (recover)
+concurrency:
+  group: db-rotate
+  cancel-in-progress: false
+jobs:
+  rotate:
+    runs-on: ubuntu-24.04
+    environment: database
+    timeout-minutes: 60
+    env:
+      RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+      DB_BACKUP_PASSPHRASE: ${{ secrets.DB_BACKUP_PASSPHRASE }}
+      RENDER_OWNER_ID: tea-d08ttr15pdvs739sthpg
+      SERVICE_ID: srv-dbcagpifngtc739isa40
+      DB_NAME: lottery-db
+      ROTATE_WITHIN_DAYS: "3"
+      HEALTH_URL: https://lottery-api-7jmj.onrender.com/readyz
+      WORK: ${{ github.workspace }}/.db-rotate
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Status
+        id: status
+        run: scripts/rotate-free-db.sh status
+      - name: Decide
+        id: plan
+        env:
+          MODE: ${{ inputs.mode || 'scheduled' }}
+          DUE: ${{ steps.status.outputs.due }}
+          PLAN: ${{ steps.status.outputs.plan }}
+        run: |
+          case "$MODE" in
+            scheduled) [ "$DUE" = true ] && action=rotate || action=none ;;
+            check) action=none ;;
+            *) action=$MODE ;;
+          esac
+          if [ "$action" = rotate ] && [ "$PLAN" != free ]; then echo "plan is $PLAN, not free: refusing to rotate"; action=none; fi
+          echo "action=$action" >> "$GITHUB_OUTPUT"
+          echo "### db-rotate: $MODE → $action (plan $PLAN, due $DUE)" >> "$GITHUB_STEP_SUMMARY"
+      - name: Freeze the api
+        id: freeze
+        if: steps.plan.outputs.action == 'rotate'
+        run: scripts/rotate-free-db.sh freeze
+      - name: Back up and verify
+        if: steps.plan.outputs.action == 'rotate' || steps.plan.outputs.action == 'dry-run'
+        env:
+          FROZEN: ${{ steps.plan.outputs.action == 'rotate' }}
+        run: scripts/rotate-free-db.sh backup
+      - name: Keep the encrypted backup
+        if: steps.plan.outputs.action == 'rotate' || steps.plan.outputs.action == 'dry-run'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: db-backup
+          path: .db-rotate/backup/
+          retention-days: 14
+          if-no-files-found: error
+      - name: Replace the database
+        id: replace
+        if: steps.plan.outputs.action == 'rotate'
+        run: scripts/rotate-free-db.sh replace
+      - name: Fetch the backup to recover
+        if: steps.plan.outputs.action == 'recover'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: db-backup
+          path: .db-rotate/backup/
+          run-id: ${{ inputs.recover_run_id }}
+          github-token: ${{ github.token }}
+      - name: Recover
+        if: steps.plan.outputs.action == 'recover'
+        run: scripts/rotate-free-db.sh recover
+      - name: Resume the api if the old database was never deleted
+        if: failure() && steps.freeze.outcome == 'success' && steps.replace.outcome != 'success'
+        run: |
+          if [ -f "$WORK/old.json" ] && scripts/rotate-free-db.sh status | grep -q "$(jq -r .id "$WORK/old.json")"; then
+            scripts/rotate-free-db.sh thaw
+            echo "Rotation failed before the old database was deleted; the api is running on it again." >> "$GITHUB_STEP_SUMMARY"
+          else
+            {
+              echo "**Rotation failed after the old database was deleted. The api is suspended.**"
+              echo "Recover: run this workflow with mode=recover and recover_run_id=${{ github.run_id }}."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
