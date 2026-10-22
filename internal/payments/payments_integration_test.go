@@ -899,3 +899,28 @@ func TestReconcile_FindsACreditedPaymentTheLedgerNeverSaw(t *testing.T) {
 		t.Fatalf("stored failing runs = %d %v", stored, err)
 	}
 }
+
+// Every payments operation must report a failed database call as an error, never as success or "nothing to do".
+func TestPayments_DatabaseFailuresAreReportedNotSwallowed(t *testing.T) {
+	e := setup(t)
+	user, _ := e.player(t)
+	tu := e.topUp(t, user, 100)
+	dead, cancel := context.WithCancel(context.Background())
+	cancel()
+	cbBody := []byte(`{"Body":{"stkCallback":{"CheckoutRequestID":"ws_CO_x","ResultCode":1032,"ResultDesc":"x"}}}`)
+	for name, op := range map[string]func() error{
+		"start":     func() error { _, err := e.svc.StartTopUp(dead, user, 100, "dead-key"); return err },
+		"get":       func() error { _, err := e.svc.Get(dead, user, tu.ID); return err },
+		"push":      func() error { return e.svc.Push(dead, tu.ID) },
+		"callback":  func() error { return e.svc.HandleCallback(dead, cbBody) },
+		"verify":    func() error { _, err := e.svc.Verify(dead, tu.ID); return err },
+		"sweep":     func() error { return e.svc.Sweep(dead) },
+		"reconcile": func() error { _, err := e.svc.Reconcile(dead); return err },
+		"reverse":   func() error { _, err := e.svc.Reverse(dead, "R1", "x", "operator:t"); return err },
+		"resolve":   func() error { return e.svc.ResolveUnconfirmed(dead, tu.ID, "R1", 100, "operator:t") },
+	} {
+		if err := op(); err == nil {
+			t.Errorf("%s: a failed database call was reported as success", name)
+		}
+	}
+}
