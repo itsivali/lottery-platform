@@ -3,9 +3,10 @@
 Read this first at the start of every session.
 
 - **Phase:** 1 — Foundations: complete. **Phase 2 — Payments: in progress** (plan and progress in
-  `docs/checkpoints/phase-2.md`). Slice 1 (Daraja client + mock) is on `feat/payments-daraja-client`; slice 2 (STK
-  top-up end to end, ADR 0006) is on `feat/payments-stk-topup`, stacked on slice 1. Neither is merged yet.
-- **Repo state:** `main` is green as of PR #24.
+  `docs/checkpoints/phase-2.md`). Slice 1 (Daraja client + mock, #26) and slice 2 (STK top-up end to end, ADR 0006,
+  #27) are merged. Next: slice 3 (C2B).
+- **Repo state:** `main` is green as of PR #27. On 2026-10-22 `main` was force-pushed once by the owner to drop
+  co-author trailers from #26 (same tree). Commits and PRs carry only the owner's name.
 - **Deployed (verified 2026-10-22):** Render Blueprint `lottery-platfform` is in sync with `main`. `lottery-api`
   (`https://lottery-api-7jmj.onrender.com`, free, Oregon) is live at `56bcbaf`; `/healthz` and `/readyz` answer 200; `/v1`
   is enabled; migrations at version 14. Free Postgres (`lottery-db`, PG 18) and Key Value (`lottery-cache`) are available.
@@ -44,12 +45,12 @@ Read this first at the start of every session.
 
 ## Next steps
 
-1. Merge slice 1, then slice 2. Then in the Render dashboard set `DARAJA_CONSUMER_KEY`, `DARAJA_CONSUMER_SECRET`,
-   `DARAJA_SHORTCODE` (174379) and `DARAJA_PASSKEY` (the sandbox values) to switch top-ups on. Next: slice 3 (C2B).
+1. In the Render dashboard set `DARAJA_CONSUMER_KEY`, `DARAJA_CONSUMER_SECRET`, `DARAJA_SHORTCODE` (174379) and
+   `DARAJA_PASSKEY` (the sandbox values) to switch top-ups on (until then they answer 503). Then slice 3 (C2B).
 2. Fix the trusted-proxy header (above) and re-run both probes.
 3. Owner: choose the national-registry (IPRS) provider.
 4. Later: password reset (STK proof + ID match), passkeys/TOTP, real Play Integrity / App Attest verifiers, nightly
-   mutation testing of the integration-backed packages. Docker is needed locally for `make test-int` / `make ci`.
+   mutation testing of the integration-backed packages.
 
 ## Open questions for the owner
 

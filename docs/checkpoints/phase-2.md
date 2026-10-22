@@ -1,6 +1,6 @@
 # Phase 2 — Payments: checkpoint
 
-Status: IN PROGRESS (started 2026-10-22 on the owner's go-ahead)
+Status: IN PROGRESS (started 2026-10-22 on the owner's go-ahead). Slices 1 (#26) and 2 (#27) merged.
 
 ## Plan (written before coding)
 
