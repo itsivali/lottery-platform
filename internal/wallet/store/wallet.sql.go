@@ -102,3 +102,18 @@ func (q *Queries) LockWalletBalance(ctx context.Context, userID string) (int64, 
 	err := row.Scan(&balance_kes)
 	return balance_kes, err
 }
+
+const playerDebt = `-- name: PlayerDebt :one
+SELECT coalesce(sum(CASE e.direction WHEN 'D' THEN e.amount_kes ELSE -e.amount_kes END), 0)::bigint
+FROM ledger.ledger_entries e
+JOIN ledger.ledger_accounts a ON a.id = e.account_id
+WHERE a.code = 'PLAYER_DEBT' AND e.user_id = $1::uuid
+`
+
+// What the player owes after reversals: the balance of their PLAYER_DEBT entries (debits add, recoveries subtract).
+func (q *Queries) PlayerDebt(ctx context.Context, userID string) (int64, error) {
+	row := q.db.QueryRow(ctx, playerDebt, userID)
+	var column_1 int64
+	err := row.Scan(&column_1)
+	return column_1, err
+}

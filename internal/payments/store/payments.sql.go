@@ -10,6 +10,133 @@ import (
 	"time"
 )
 
+const accountBalance = `-- name: AccountBalance :one
+SELECT coalesce(sum(CASE e.direction WHEN 'D' THEN e.amount_kes ELSE -e.amount_kes END), 0)::bigint
+FROM ledger.ledger_entries e JOIN ledger.ledger_accounts a ON a.id = e.account_id WHERE a.code = $1
+`
+
+// debits minus credits on an account
+func (q *Queries) AccountBalance(ctx context.Context, code string) (int64, error) {
+	row := q.db.QueryRow(ctx, accountBalance, code)
+	var column_1 int64
+	err := row.Scan(&column_1)
+	return column_1, err
+}
+
+const creditedTotal = `-- name: CreditedTotal :one
+SELECT coalesce(sum(amount_confirmed_kes), 0)::bigint FROM payments.payments WHERE status = 'credited'
+`
+
+func (q *Queries) CreditedTotal(ctx context.Context) (int64, error) {
+	row := q.db.QueryRow(ctx, creditedTotal)
+	var column_1 int64
+	err := row.Scan(&column_1)
+	return column_1, err
+}
+
+const creditedWithoutDeposit = `-- name: CreditedWithoutDeposit :many
+
+SELECT p.id FROM payments.payments p
+WHERE p.status IN ('credited','reversed')
+  AND NOT EXISTS (SELECT 1 FROM ledger.ledger_journals j WHERE j.kind = 'deposit' AND j.reference_type = 'payment' AND j.reference_id = p.id)
+ORDER BY p.id
+`
+
+// Reconciliation. Each "mismatch" query returns the ids that break an invariant; each must return nothing.
+func (q *Queries) CreditedWithoutDeposit(ctx context.Context) ([]string, error) {
+	rows, err := q.db.Query(ctx, creditedWithoutDeposit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const depositAmountMismatch = `-- name: DepositAmountMismatch :many
+SELECT p.id FROM payments.payments p
+JOIN ledger.ledger_journals j ON j.kind = 'deposit' AND j.reference_type = 'payment' AND j.reference_id = p.id
+JOIN ledger.ledger_entries e ON e.journal_id = j.id AND e.direction = 'D'
+JOIN ledger.ledger_accounts a ON a.id = e.account_id AND a.code = 'MPESA_CLEARING'
+GROUP BY p.id, p.amount_confirmed_kes
+HAVING sum(e.amount_kes) IS DISTINCT FROM p.amount_confirmed_kes
+ORDER BY p.id
+`
+
+func (q *Queries) DepositAmountMismatch(ctx context.Context) ([]string, error) {
+	rows, err := q.db.Query(ctx, depositAmountMismatch)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const depositExciseDeducted = `-- name: DepositExciseDeducted :one
+SELECT coalesce(sum(e.amount_kes), 0)::bigint
+FROM ledger.ledger_entries e
+JOIN ledger.ledger_journals j ON j.id = e.journal_id
+JOIN ledger.ledger_accounts a ON a.id = e.account_id
+WHERE j.kind = 'deposit' AND j.reference_type = 'payment' AND j.reference_id = $1::uuid
+  AND a.code = 'WALLET_LIABILITY' AND e.direction = 'D'
+`
+
+// What the deposit of a payment deducted from the player's credit (the deposit_excise line; 0 when absorbed).
+func (q *Queries) DepositExciseDeducted(ctx context.Context, paymentID string) (int64, error) {
+	row := q.db.QueryRow(ctx, depositExciseDeducted, paymentID)
+	var column_1 int64
+	err := row.Scan(&column_1)
+	return column_1, err
+}
+
+const depositWithoutCredit = `-- name: DepositWithoutCredit :many
+SELECT j.reference_id::text FROM ledger.ledger_journals j
+WHERE j.kind = 'deposit' AND j.reference_type = 'payment'
+  AND NOT EXISTS (SELECT 1 FROM payments.payments p WHERE p.id = j.reference_id AND p.status IN ('credited','reversed'))
+ORDER BY 1
+`
+
+func (q *Queries) DepositWithoutCredit(ctx context.Context) ([]string, error) {
+	rows, err := q.db.Query(ctx, depositWithoutCredit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []string
+	for rows.Next() {
+		var j_reference_id string
+		if err := rows.Scan(&j_reference_id); err != nil {
+			return nil, err
+		}
+		items = append(items, j_reference_id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const depositedSince = `-- name: DepositedSince :one
 SELECT coalesce(sum(coalesce(amount_confirmed_kes, amount_requested_kes)), 0)::bigint
 FROM payments.payments
@@ -104,6 +231,21 @@ func (q *Queries) InsertOrphanCallback(ctx context.Context, arg InsertOrphanCall
 	return err
 }
 
+const insertReconciliationRun = `-- name: InsertReconciliationRun :exec
+INSERT INTO payments.reconciliation_runs (ran_at, ok, report) VALUES ($1, $2, $3)
+`
+
+type InsertReconciliationRunParams struct {
+	RanAt  time.Time
+	Ok     bool
+	Report []byte
+}
+
+func (q *Queries) InsertReconciliationRun(ctx context.Context, arg InsertReconciliationRunParams) error {
+	_, err := q.db.Exec(ctx, insertReconciliationRun, arg.RanAt, arg.Ok, arg.Report)
+	return err
+}
+
 const insertTopUp = `-- name: InsertTopUp :one
 INSERT INTO payments.payments (user_id, channel, amount_requested_kes, msisdn, idempotency_key, created_at, updated_at)
 VALUES ($1, 'stk', $2, $3, $4, $5, $5)
@@ -190,6 +332,29 @@ func (q *Queries) LockPaymentByCheckout(ctx context.Context, checkoutRequestID *
 	return i, err
 }
 
+const lockPaymentByReceipt = `-- name: LockPaymentByReceipt :one
+SELECT id, user_id, status, amount_confirmed_kes FROM payments.payments WHERE mpesa_receipt = $1 FOR UPDATE
+`
+
+type LockPaymentByReceiptRow struct {
+	ID                 string
+	UserID             string
+	Status             string
+	AmountConfirmedKes *int64
+}
+
+func (q *Queries) LockPaymentByReceipt(ctx context.Context, mpesaReceipt *string) (LockPaymentByReceiptRow, error) {
+	row := q.db.QueryRow(ctx, lockPaymentByReceipt, mpesaReceipt)
+	var i LockPaymentByReceiptRow
+	err := row.Scan(
+		&i.ID,
+		&i.UserID,
+		&i.Status,
+		&i.AmountConfirmedKes,
+	)
+	return i, err
+}
+
 const markCredited = `-- name: MarkCredited :exec
 UPDATE payments.payments
    SET status = 'credited', amount_confirmed_kes = $1, mpesa_receipt = $2,
@@ -211,6 +376,23 @@ func (q *Queries) MarkCredited(ctx context.Context, arg MarkCreditedParams) erro
 		arg.At,
 		arg.ID,
 	)
+	return err
+}
+
+const markReversed = `-- name: MarkReversed :exec
+UPDATE payments.payments
+   SET status = 'reversed', reversed_at = $1, reversal_reason = $2, updated_at = $1
+ WHERE id = $3 AND status = 'credited'
+`
+
+type MarkReversedParams struct {
+	At     *time.Time
+	Reason *string
+	ID     string
+}
+
+func (q *Queries) MarkReversed(ctx context.Context, arg MarkReversedParams) error {
+	_, err := q.db.Exec(ctx, markReversed, arg.At, arg.Reason, arg.ID)
 	return err
 }
 
@@ -253,6 +435,66 @@ func (q *Queries) OrphanCallback(ctx context.Context, checkoutRequestID string) 
 	return raw_payload, err
 }
 
+const overduePending = `-- name: OverduePending :many
+SELECT id FROM payments.payments
+WHERE status IN ('initiated','stk_sent','callback_received') AND created_at < $1 ORDER BY created_at
+`
+
+func (q *Queries) OverduePending(ctx context.Context, createdAt time.Time) ([]string, error) {
+	rows, err := q.db.Query(ctx, overduePending, createdAt)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const playersInDebt = `-- name: PlayersInDebt :many
+SELECT e.user_id::text AS user_id,
+       sum(CASE e.direction WHEN 'D' THEN e.amount_kes ELSE -e.amount_kes END)::bigint AS debt
+FROM ledger.ledger_entries e JOIN ledger.ledger_accounts a ON a.id = e.account_id
+WHERE a.code = 'PLAYER_DEBT' AND e.user_id IS NOT NULL
+GROUP BY e.user_id
+HAVING sum(CASE e.direction WHEN 'D' THEN e.amount_kes ELSE -e.amount_kes END) > 0
+ORDER BY 1
+`
+
+type PlayersInDebtRow struct {
+	UserID string
+	Debt   int64
+}
+
+func (q *Queries) PlayersInDebt(ctx context.Context) ([]PlayersInDebtRow, error) {
+	rows, err := q.db.Query(ctx, playersInDebt)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []PlayersInDebtRow
+	for rows.Next() {
+		var i PlayersInDebtRow
+		if err := rows.Scan(&i.UserID, &i.Debt); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const receiptUsedElsewhere = `-- name: ReceiptUsedElsewhere :one
 SELECT EXISTS (SELECT 1 FROM payments.payments WHERE mpesa_receipt = $1 AND id <> $2)
 `
@@ -267,6 +509,30 @@ func (q *Queries) ReceiptUsedElsewhere(ctx context.Context, arg ReceiptUsedElsew
 	var exists bool
 	err := row.Scan(&exists)
 	return exists, err
+}
+
+const recentOrphanCallbacks = `-- name: RecentOrphanCallbacks :many
+SELECT DISTINCT checkout_request_id FROM payments.stk_orphan_callbacks WHERE received_at >= $1 ORDER BY 1
+`
+
+func (q *Queries) RecentOrphanCallbacks(ctx context.Context, receivedAt time.Time) ([]string, error) {
+	rows, err := q.db.Query(ctx, recentOrphanCallbacks, receivedAt)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []string
+	for rows.Next() {
+		var checkout_request_id string
+		if err := rows.Scan(&checkout_request_id); err != nil {
+			return nil, err
+		}
+		items = append(items, checkout_request_id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const recordCallback = `-- name: RecordCallback :exec
@@ -285,6 +551,33 @@ type RecordCallbackParams struct {
 func (q *Queries) RecordCallback(ctx context.Context, arg RecordCallbackParams) error {
 	_, err := q.db.Exec(ctx, recordCallback, arg.RawCallback, arg.At, arg.ID)
 	return err
+}
+
+const reversalMismatch = `-- name: ReversalMismatch :many
+SELECT p.id::text FROM payments.payments p
+WHERE (p.status = 'reversed') <> EXISTS (SELECT 1 FROM ledger.ledger_journals j
+  WHERE j.kind = 'deposit_reversal' AND j.reference_type = 'payment' AND j.reference_id = p.id)
+ORDER BY 1
+`
+
+func (q *Queries) ReversalMismatch(ctx context.Context) ([]string, error) {
+	rows, err := q.db.Query(ctx, reversalMismatch)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []string
+	for rows.Next() {
+		var p_id string
+		if err := rows.Scan(&p_id); err != nil {
+			return nil, err
+		}
+		items = append(items, p_id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const setPaymentOutcome = `-- name: SetPaymentOutcome :exec
@@ -337,4 +630,39 @@ func (q *Queries) StalePending(ctx context.Context, createdAt time.Time) ([]stri
 		return nil, err
 	}
 	return items, nil
+}
+
+const unconfirmedPayments = `-- name: UnconfirmedPayments :many
+SELECT id FROM payments.payments WHERE status = 'unconfirmed' ORDER BY created_at
+`
+
+func (q *Queries) UnconfirmedPayments(ctx context.Context) ([]string, error) {
+	rows, err := q.db.Query(ctx, unconfirmedPayments)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const walletsTotal = `-- name: WalletsTotal :one
+SELECT coalesce(sum(balance_kes), 0)::bigint FROM wallet.wallets
+`
+
+func (q *Queries) WalletsTotal(ctx context.Context) (int64, error) {
+	row := q.db.QueryRow(ctx, walletsTotal)
+	var column_1 int64
+	err := row.Scan(&column_1)
+	return column_1, err
 }

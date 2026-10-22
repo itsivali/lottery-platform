@@ -228,7 +228,7 @@ func TestWallet_DepositReversalBeyondBalanceRecordsPlayerDebt(t *testing.T) {
 		t.Fatal(err)
 	}
 	err = pgx.BeginFunc(ctx, e.pool, func(tx pgx.Tx) error {
-		_, bal, err := e.svc.ReverseDeposit(ctx, tx, payment, u, 1000)
+		_, bal, err := e.svc.ReverseDeposit(ctx, tx, payment, u, 1000, 0)
 		if bal != 0 {
 			t.Errorf("balance after reversal = %d, want 0", bal)
 		}
@@ -282,9 +282,10 @@ func TestLedgerWallet_Property_RandomSequencesKeepEverythingBalanced(t *testing.
 		users := []string{e.newUser(t), e.newUser(t)}
 		model := map[string]int64{}
 		type deposit struct {
-			ref   string
-			user  string
-			gross int64
+			ref    string
+			user   string
+			gross  int64
+			excise int64 // deducted from the credit (0 when the operator absorbed it)
 		}
 		var deposits []deposit
 		var withdrawals []struct {
@@ -326,7 +327,7 @@ func TestLedgerWallet_Property_RandomSequencesKeepEverythingBalanced(t *testing.
 				ref := newRef()
 				deduct := rapid.Bool().Draw(rt, "deduct")
 				step("topup", func() (ledger.Posting, error) { return ledger.Deposit(ref, u, amt, excise, deduct) },
-					func(ledger.Posting) { deposits = append(deposits, deposit{ref, u, amt}) })
+					func(p ledger.Posting) { deposits = append(deposits, deposit{ref, u, amt, amt - p.WalletDelta()}) })
 			},
 			"play": func(rt *rapid.T) {
 				u := rapid.SampledFrom(users).Draw(rt, "user")
@@ -378,7 +379,7 @@ func TestLedgerWallet_Property_RandomSequencesKeepEverythingBalanced(t *testing.
 				deposits = append(deposits[:i], deposits[i+1:]...)
 				var delta int64
 				err := pgx.BeginFunc(ctx, e.pool, func(tx pgx.Tx) error {
-					p, _, err := e.svc.ReverseDeposit(ctx, tx, d.ref, d.user, d.gross)
+					p, _, err := e.svc.ReverseDeposit(ctx, tx, d.ref, d.user, d.gross, d.excise)
 					delta = p.WalletDelta()
 					return err
 				})
@@ -473,10 +474,115 @@ func TestWallet_ReverseDepositRejectsNonPositiveAmounts(t *testing.T) {
 	ctx := context.Background()
 	u := e.newUser(t)
 	err := pgx.BeginFunc(ctx, e.pool, func(tx pgx.Tx) error {
-		_, _, err := e.svc.ReverseDeposit(ctx, tx, newRef(), u, 0)
+		_, _, err := e.svc.ReverseDeposit(ctx, tx, newRef(), u, 0, 0)
 		return err
 	})
 	if err == nil {
 		t.Fatal("reversal of 0 accepted")
+	}
+}
+
+// post applies a posting built by a ledger rule, passing the rule's error through.
+func (e *env) post(p ledger.Posting, perr error) error {
+	_, err := e.apply(context.Background(), p, perr)
+	return err
+}
+
+func (e *env) debt(t testing.TB, user string) int64 {
+	t.Helper()
+	var d int64
+	if err := pgx.BeginFunc(context.Background(), e.pool, func(tx pgx.Tx) error {
+		var err error
+		d, err = e.svc.Debt(context.Background(), tx, user)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return d
+}
+
+func (e *env) recover(t testing.TB, user, paymentID string) int64 {
+	t.Helper()
+	var n int64
+	if err := pgx.BeginFunc(context.Background(), e.pool, func(tx pgx.Tx) error {
+		var err error
+		n, err = e.svc.RecoverDebt(context.Background(), tx, user, paymentID)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
+func TestWallet_DebtFromAReversalIsRecoveredFromLaterDepositsOncePerDeposit(t *testing.T) {
+	e := setup(t)
+	ctx := context.Background()
+	u, other := e.newUser(t), e.newUser(t)
+	none := rule(t, "0")
+	first := newRef()
+	if err := e.post(ledger.Deposit(first, u, 400, none, true)); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.post(ledger.Stake(newRef(), u, 250)); err != nil { // 150 left
+		t.Fatal(err)
+	}
+	if err := pgx.BeginFunc(ctx, e.pool, func(tx pgx.Tx) error {
+		_, _, err := e.svc.ReverseDeposit(ctx, tx, first, u, 400, 0)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if d, b := e.debt(t, u), e.balance(t, u); d != 250 || b != 0 {
+		t.Fatalf("after reversal: debt %d balance %d, want 250 and 0", d, b)
+	}
+	if d := e.debt(t, other); d != 0 {
+		t.Fatalf("another player's debt = %d", d)
+	}
+
+	second := newRef() // a 100 deposit covers part of the debt
+	if err := e.post(ledger.Deposit(second, u, 100, none, true)); err != nil {
+		t.Fatal(err)
+	}
+	if n := e.recover(t, u, second); n != 100 {
+		t.Fatalf("recovered %d, want 100", n)
+	}
+	if n := e.recover(t, u, second); n != 0 { // the same deposit never recovers twice
+		t.Fatalf("second recovery from the same deposit = %d", n)
+	}
+	third := newRef() // a 500 deposit clears the rest and leaves 350
+	if err := e.post(ledger.Deposit(third, u, 500, none, true)); err != nil {
+		t.Fatal(err)
+	}
+	if n := e.recover(t, u, third); n != 150 {
+		t.Fatalf("recovered %d, want 150", n)
+	}
+	if d, b := e.debt(t, u), e.balance(t, u); d != 0 || b != 350 {
+		t.Fatalf("after recovery: debt %d balance %d, want 0 and 350", d, b)
+	}
+	if n := e.recover(t, u, newRef()); n != 0 {
+		t.Fatalf("recovered %d without any debt", n)
+	}
+}
+
+// A failing database call inside a money operation must surface as an error, never as "nothing to do".
+func TestWallet_DatabaseFailuresInDebtOperationsAreReportedNotSwallowed(t *testing.T) {
+	e := setup(t)
+	u := e.newUser(t)
+	ctx := context.Background()
+	dead, cancel := context.WithCancel(ctx)
+	cancel()
+	for name, op := range map[string]func(pgx.Tx) error{
+		"recover debt": func(tx pgx.Tx) error { _, err := e.svc.RecoverDebt(dead, tx, u, newRef()); return err },
+		"debt":         func(tx pgx.Tx) error { _, err := e.svc.Debt(dead, tx, u); return err },
+		"reverse":      func(tx pgx.Tx) error { _, _, err := e.svc.ReverseDeposit(dead, tx, newRef(), u, 100, 0); return err },
+	} {
+		tx, err := e.pool.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := op(tx); err == nil {
+			t.Errorf("%s: a failed database call was reported as success", name)
+		}
+		_ = tx.Rollback(ctx)
 	}
 }
