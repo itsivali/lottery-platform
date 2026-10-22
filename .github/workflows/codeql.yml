@@ -16,7 +16,7 @@ jobs:
     outputs:
       languages: ${{ steps.d.outputs.languages }}
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - id: d
         run: |
           langs='["go"]'
@@ -34,7 +34,7 @@ jobs:
       matrix:
         language: ${{ fromJSON(needs.detect.outputs.languages) }}
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
         if: matrix.language == 'go'
         with: { go-version-file: go.mod }
