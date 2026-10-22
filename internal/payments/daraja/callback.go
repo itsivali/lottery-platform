@@ -12,7 +12,7 @@ import (
 type STKCallback struct {
 	MerchantRequestID string
 	CheckoutRequestID string
-	ResultCode        int
+	ResultCode        int32
 	ResultDesc        string
 	// Set only on a paid callback.
 	AmountKES int64

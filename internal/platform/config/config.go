@@ -21,6 +21,8 @@ type Config struct {
 	MigrateOnStart bool
 	// API configures the public /v1 API (disabled unless its secrets are present).
 	API API
+	// Payments configures M-Pesa top-ups (disabled unless the Daraja credentials are present).
+	Payments Payments
 }
 
 // Load reads configuration from environment variables.
@@ -53,6 +55,9 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	cfg.API = api
+	if cfg.Payments, err = loadPayments(api); err != nil {
+		return Config{}, err
+	}
 	return cfg, nil
 }
 

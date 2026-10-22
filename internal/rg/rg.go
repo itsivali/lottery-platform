@@ -228,6 +228,36 @@ func (s *Service) AssertNotRestricted(ctx context.Context, tx pgx.Tx, userID str
 	return nil
 }
 
+// AssertDepositAllowed returns a *LimitError if depositing amount would take the player past any deposit limit in
+// force. deposited reports what the player has deposited since a window start; the payments module, which owns
+// deposits, supplies it. Called in the same transaction as the top-up (invariant 12).
+func (s *Service) AssertDepositAllowed(ctx context.Context, tx pgx.Tx, userID string, amount int64, deposited func(since time.Time) (int64, error)) error {
+	now, err := s.clk.Now(ctx, tx)
+	if err != nil {
+		return err
+	}
+	state, err := s.state(ctx, store.New(tx), userID, now)
+	if err != nil {
+		return err
+	}
+	limits, spent := map[Period]int64{}, map[Period]int64{}
+	for _, p := range periods {
+		c := state[p].Current
+		if c == nil {
+			continue
+		}
+		since, err := WindowStart(p, now)
+		if err != nil {
+			return err
+		}
+		if spent[p], err = deposited(since); err != nil {
+			return err
+		}
+		limits[p] = c.AmountKES
+	}
+	return CheckDeposit(limits, spent, amount)
+}
+
 // WindowStart returns the start of the limit window containing now, on Africa/Nairobi calendar boundaries
 // (weeks start on Monday).
 func WindowStart(p Period, now time.Time) (time.Time, error) {

@@ -34,7 +34,6 @@ build/
 *.tfstate.*
 .terraform/
 # Local
-.claude/
 tmp/
 
 # Private project documents: kept on disk for the team, never committed.

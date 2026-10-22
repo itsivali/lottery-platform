@@ -13,6 +13,7 @@ tags:
   - name: auth
   - name: kyc
   - name: responsible-gaming
+  - name: payments
 paths:
   /healthz:
     get:
@@ -278,6 +279,79 @@ paths:
         "204": { description: Self-exclusion started }
         "400": { $ref: "#/components/responses/Problem" }
         "401": { $ref: "#/components/responses/Problem" }
+  /v1/payments/topups:
+    post:
+      operationId: startTopUp
+      tags: [payments]
+      summary: Top up the wallet with M-Pesa (STK Push to the account's own number)
+      description: |
+        Sends an M-Pesa prompt to the number on the account (never one supplied by the client). Needs a verified
+        national ID; the first approved prompt also proves the phone number. The wallet is credited with the amount
+        actually paid, net of deposit excise, once Daraja's status query confirms it. Poll `GET /v1/payments/{id}`.
+      parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TopUpRequest" }
+      responses:
+        "202":
+          description: Accepted; the prompt is being sent
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TopUp" }
+        "400": { $ref: "#/components/responses/Problem" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403":
+          description: KYC not verified (`kyc-required`), over a deposit limit (`deposit-limit`) or restricted (`restricted`)
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+        "429": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+  /v1/payments/{id}:
+    get:
+      operationId: getPayment
+      tags: [payments]
+      summary: One of the signed-in player's top-ups
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: The top-up
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TopUp" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+  /hooks/mpesa/stk/{path}:
+    post:
+      operationId: stkCallback
+      tags: [payments]
+      summary: Daraja STK Push result callback (called by Safaricom, not by clients)
+      description: |
+        Authenticated by the secret last path segment, which is only ever sent to Daraja. Needs no token and no
+        Idempotency-Key. The callback is stored and verified against Daraja's status query before any money moves.
+      security: []
+      parameters:
+        - { name: path, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object }
+      responses:
+        "200":
+          description: Acknowledged
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ResultCode: { type: integer }
+                  ResultDesc: { type: string }
+        "400": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
 components:
   securitySchemes:
     bearer:
@@ -303,6 +377,23 @@ components:
         application/problem+json:
           schema: { $ref: "#/components/schemas/Problem" }
   schemas:
+    TopUpRequest:
+      type: object
+      additionalProperties: false
+      required: [amount_kes]
+      properties:
+        amount_kes: { type: integer, minimum: 10, maximum: 250000, description: Whole shillings. }
+    TopUp:
+      type: object
+      required: [id, status, amount_requested_kes, amount_confirmed_kes, created_at]
+      properties:
+        id: { type: string }
+        status: { type: string, enum: [pending, credited, failed] }
+        amount_requested_kes: { type: integer }
+        amount_confirmed_kes:
+          type: [integer, "null"]
+          description: What the player actually paid (credited gross, before excise); null until credited.
+        created_at: { type: string, format: date-time }
     Problem:
       type: object
       required: [type, title, status]

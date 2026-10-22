@@ -1,0 +1,86 @@
+package config
+
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"net/url"
+	"os"
+	"strings"
+)
+
+// Payments configures M-Pesa top-ups through Daraja. Like the API it is all-or-nothing: with no Daraja credentials
+// top-ups are refused (fail closed); with some but not all the process refuses to start.
+type Payments struct {
+	Enabled bool
+
+	BaseURL         string // defaults to the Daraja sandbox
+	ConsumerKey     string
+	ConsumerSecret  string
+	ShortCode       string
+	Passkey         string
+	AllowProduction bool // required to use api.safaricom.co.ke
+
+	// CallbackPath is the unguessable last segment of the callback URL: a hex SHA-256 of DARAJA_CALLBACK_TOKEN, so a
+	// generated base64 secret (which may contain '/') is always safe in a path.
+	CallbackPath string
+	PublicURL    string // the API's public origin (PUBLIC_BASE_URL, else Render's RENDER_EXTERNAL_URL)
+}
+
+// SandboxURL is Safaricom's Daraja sandbox.
+const SandboxURL = "https://sandbox.safaricom.co.ke"
+
+// CallbackRoute is where Daraja posts STK results; the last segment is Payments.CallbackPath.
+const CallbackRoute = "/hooks/mpesa/stk/"
+
+// CallbackURL is the URL handed to Daraja with every push.
+func (p Payments) CallbackURL() string { return p.PublicURL + CallbackRoute + p.CallbackPath }
+
+var darajaSecrets = []string{"DARAJA_CONSUMER_KEY", "DARAJA_CONSUMER_SECRET", "DARAJA_SHORTCODE", "DARAJA_PASSKEY", "DARAJA_CALLBACK_TOKEN"}
+
+func loadPayments(api API) (Payments, error) {
+	var set, missing []string
+	for _, k := range darajaSecrets {
+		if os.Getenv(k) != "" {
+			set = append(set, k)
+		} else {
+			missing = append(missing, k)
+		}
+	}
+	if len(set) == 0 {
+		return Payments{}, nil
+	}
+	if len(missing) > 0 {
+		return Payments{}, fmt.Errorf("config: payments are partly configured (%s set) but %s missing", strings.Join(set, ", "), strings.Join(missing, ", "))
+	}
+	if !api.Enabled {
+		return Payments{}, errors.New("config: payments need the v1 API to be configured")
+	}
+	p := Payments{
+		Enabled: true, BaseURL: getenv("DARAJA_BASE_URL", SandboxURL),
+		ConsumerKey: os.Getenv("DARAJA_CONSUMER_KEY"), ConsumerSecret: os.Getenv("DARAJA_CONSUMER_SECRET"),
+		ShortCode: os.Getenv("DARAJA_SHORTCODE"), Passkey: os.Getenv("DARAJA_PASSKEY"),
+		AllowProduction: os.Getenv("DARAJA_ALLOW_PRODUCTION") == "true",
+		PublicURL:       strings.TrimRight(getenv("PUBLIC_BASE_URL", os.Getenv("RENDER_EXTERNAL_URL")), "/"),
+	}
+	token := os.Getenv("DARAJA_CALLBACK_TOKEN")
+	if len(token) < 24 {
+		return Payments{}, errors.New("config: DARAJA_CALLBACK_TOKEN must be at least 24 random characters")
+	}
+	sum := sha256.Sum256([]byte(token))
+	p.CallbackPath = hex.EncodeToString(sum[:])
+	if p.PublicURL == "" {
+		return Payments{}, errors.New("config: PUBLIC_BASE_URL (or RENDER_EXTERNAL_URL) is required so Daraja can call back")
+	}
+	if err := checkGatewayURL("PUBLIC_BASE_URL", p.PublicURL); err != nil {
+		return Payments{}, err
+	}
+	if err := checkGatewayURL("DARAJA_BASE_URL", p.BaseURL); err != nil {
+		return Payments{}, err
+	}
+	if u, _ := url.Parse(p.BaseURL); u.Hostname() == "api.safaricom.co.ke" && !p.AllowProduction {
+		return Payments{}, errors.New("config: DARAJA_BASE_URL is production; set DARAJA_ALLOW_PRODUCTION=true only when that is intended")
+	}
+	return p, nil
+}

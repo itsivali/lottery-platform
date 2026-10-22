@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# E2E: bring up the stack, check the probes, then sign up, log in and verify identity through the real API and worker.
+# E2E: bring up the stack, check the probes, then sign up, log in, verify identity and top up through the real API,
+# workers and the Daraja mock (which approves every prompt after two seconds and calls the api back).
 # Playwright journeys for the clients arrive with the clients.
 set -euo pipefail
 docker compose up -d --build --wait
@@ -28,4 +29,13 @@ for _ in $(seq 1 60); do
   sleep 0.5
 done
 [ "$status" = verified ] || { echo "KYC never verified (status: $status)"; docker compose logs api | tail -20; exit 1; }
+
+[ "$(post /v1/payments/topups e2e-4 '{"amount_kes":100}' "$token")" = 202 ] || { echo "top-up failed"; cat /tmp/e2e.body; exit 1; }
+payment=$(jq -r .id /tmp/e2e.body)
+for _ in $(seq 1 60); do
+  status=$(curl -fsS "localhost:8080/v1/payments/$payment" -H "Authorization: Bearer $token" | jq -r .status)
+  [ "$status" = credited ] && break
+  sleep 0.5
+done
+[ "$status" = credited ] || { echo "top-up never credited (status: $status)"; docker compose logs api daraja-mock | tail -30; exit 1; }
 echo "e2e smoke ok"

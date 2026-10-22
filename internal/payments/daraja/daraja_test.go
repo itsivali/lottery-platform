@@ -287,3 +287,13 @@ func TestNew_RefusesIncompleteOrProductionConfig(t *testing.T) {
 		t.Errorf("explicitly allowed production: %v", err)
 	}
 }
+
+func TestSTKQuery_AResultCodeOutsideTheInt32RangeIsAnOutageNotAnOutcome(t *testing.T) {
+	f := &fakeDaraja{query: func(w http.ResponseWriter, _ map[string]any) {
+		_, _ = w.Write([]byte(`{"ResponseCode":"0","ResultCode":"99999999999","ResultDesc":"?"}`))
+	}}
+	c, _ := newClient(t, f)
+	if _, err := c.STKQuery(context.Background(), "ws_CO_1"); !errors.Is(err, daraja.ErrUnavailable) {
+		t.Fatalf("err = %v", err)
+	}
+}

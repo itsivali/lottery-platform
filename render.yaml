@@ -69,3 +69,19 @@ services:
         sync: false
       - key: APPLE_CLIENT_ID
         sync: false
+
+      # M-Pesa (Daraja). Sandbox only until the owner decides otherwise: the production host is refused unless
+      # DARAJA_ALLOW_PRODUCTION=true. Credentials are entered in the dashboard; all four unset means top-ups are
+      # refused. The callback URL is RENDER_EXTERNAL_URL + /hooks/mpesa/stk/ + sha256(DARAJA_CALLBACK_TOKEN).
+      - key: DARAJA_BASE_URL
+        value: https://sandbox.safaricom.co.ke
+      - key: DARAJA_CALLBACK_TOKEN
+        generateValue: true
+      - key: DARAJA_CONSUMER_KEY
+        sync: false
+      - key: DARAJA_CONSUMER_SECRET
+        sync: false
+      - key: DARAJA_SHORTCODE
+        sync: false
+      - key: DARAJA_PASSKEY
+        sync: false

@@ -10,10 +10,12 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/itsivali/lottery-platform/internal/app"
+	"github.com/itsivali/lottery-platform/internal/payments/darajamock"
 	"github.com/itsivali/lottery-platform/internal/platform/config"
 	"github.com/itsivali/lottery-platform/internal/platform/httpx"
 	"github.com/itsivali/lottery-platform/internal/platform/testpg"
@@ -79,7 +81,20 @@ func TestApp_FullJourneyThroughTheRealWiring(t *testing.T) {
 	g := newGateways(t)
 	vk := testvalkey.Start(t)
 	pool := testpg.Pool(t, "app_worker") // one role for api and worker, as in a single-service deployment
-	a, err := app.New(ctx, baseCfg(t, g, vk), pool)
+
+	// The server must exist before the app so its URL can be the callback origin Daraja (the mock) calls back.
+	var router http.Handler
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { router.ServeHTTP(w, r) }))
+	t.Cleanup(srv.Close)
+	mock := darajamock.New(darajamock.Options{ConsumerKey: "ck", ConsumerSecret: "cs", ShortCode: "174379", Passkey: "pk"})
+	mock.AutoComplete(ctx, 0) // the customer approves every prompt at once
+	dm := httptest.NewServer(mock)
+	t.Cleanup(dm.Close)
+	cfg := baseCfg(t, g, vk)
+	cfg.Payments = config.Payments{Enabled: true, BaseURL: dm.URL, ConsumerKey: "ck", ConsumerSecret: "cs", ShortCode: "174379",
+		Passkey: "pk", CallbackPath: strings.Repeat("c", 64), PublicURL: srv.URL}
+
+	a, err := app.New(ctx, cfg, pool)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,8 +105,7 @@ func TestApp_FullJourneyThroughTheRealWiring(t *testing.T) {
 	if err := a.StartWorkers(ctx); err != nil {
 		t.Fatal(err)
 	}
-	srv := httptest.NewServer(httpx.NewRouterWith(pool, a.Mount))
-	t.Cleanup(srv.Close)
+	router = httpx.NewRouterWith(pool, a.Mount)
 
 	dev := map[string]any{"fingerprint": "fp", "platform": "android"}
 	if c, out := call(t, srv, http.MethodPost, "/v1/auth/signup", "", "k1", "198.51.100.1",
@@ -119,6 +133,34 @@ func TestApp_FullJourneyThroughTheRealWiring(t *testing.T) {
 			t.Fatalf("worker never verified the submission, status %v", out["status"])
 		}
 		time.Sleep(200 * time.Millisecond) //nolint:forbidigo // polling helper
+	}
+
+	// Top-up: push job -> mock prompt approved -> callback over HTTP -> verify job -> credited, phone proved.
+	c, out := call(t, srv, http.MethodPost, "/v1/payments/topups", access, "k4", "198.51.100.1", map[string]any{"amount_kes": 100})
+	if c != 202 {
+		t.Fatalf("top-up = %d %v", c, out)
+	}
+	id := out["id"].(string)
+	for {
+		_, out := call(t, srv, http.MethodGet, "/v1/payments/"+id, access, "x", "", nil)
+		if out["status"] == "credited" {
+			break
+		}
+		if out["status"] == "failed" || time.Now().After(deadline.Add(20*time.Second)) { //nolint:forbidigo // test polling deadline
+			t.Fatalf("top-up never credited: %v", out)
+		}
+		time.Sleep(200 * time.Millisecond) //nolint:forbidigo // polling helper
+	}
+	var balance int64
+	var proved bool
+	if err := pool.QueryRow(ctx, `SELECT w.balance_kes, u.msisdn_verified_at IS NOT NULL FROM wallet.wallets w JOIN identity.users u ON u.id = w.user_id`).Scan(&balance, &proved); err != nil {
+		t.Fatal(err)
+	}
+	if balance != 95 || !proved {
+		t.Fatalf("balance = %d, phone proved = %v", balance, proved)
+	}
+	if p := mock.Pushes(); len(p) != 1 || p[0].MSISDN != "254712345678" || p[0].CallbackURL != srv.URL+"/hooks/mpesa/stk/"+strings.Repeat("c", 64) {
+		t.Fatalf("pushes = %+v", p)
 	}
 }
 

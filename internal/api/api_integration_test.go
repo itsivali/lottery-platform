@@ -25,6 +25,10 @@ import (
 	"github.com/itsivali/lottery-platform/internal/audit"
 	"github.com/itsivali/lottery-platform/internal/identity"
 	"github.com/itsivali/lottery-platform/internal/kyc"
+	"github.com/itsivali/lottery-platform/internal/ledger"
+	"github.com/itsivali/lottery-platform/internal/payments"
+	"github.com/itsivali/lottery-platform/internal/payments/daraja"
+	"github.com/itsivali/lottery-platform/internal/payments/darajamock"
 	"github.com/itsivali/lottery-platform/internal/platform/clock"
 	"github.com/itsivali/lottery-platform/internal/platform/crypto"
 	"github.com/itsivali/lottery-platform/internal/platform/httpx"
@@ -33,7 +37,30 @@ import (
 	"github.com/itsivali/lottery-platform/internal/platform/testpg"
 	"github.com/itsivali/lottery-platform/internal/platform/testvalkey"
 	"github.com/itsivali/lottery-platform/internal/rg"
+	"github.com/itsivali/lottery-platform/internal/wallet"
 )
+
+// payQueue stands in for River for payment jobs: the API tests only check what was enqueued.
+type payQueue struct {
+	mu   sync.Mutex
+	jobs []string
+}
+
+func (q *payQueue) EnqueuePush(_ context.Context, _ pgx.Tx, id string) error {
+	return q.add("push:" + id)
+}
+func (q *payQueue) EnqueueVerify(_ context.Context, _ pgx.Tx, id string, src payments.VerifySource) error {
+	return q.add("verify:" + string(src) + ":" + id)
+}
+
+func (q *payQueue) add(s string) error {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.jobs = append(q.jobs, s)
+	return nil
+}
+
+const callbackPath = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
 type fakeOIDC struct{}
 
@@ -80,6 +107,7 @@ type env struct {
 	vk   *testvalkey.Server
 	srv  *httptest.Server
 	enq  *kycQueue
+	pay  *payQueue
 	keys int
 }
 
@@ -95,20 +123,33 @@ func setup(t *testing.T) *env {
 	kr, _ := crypto.NewKeyring(1, map[byte][]byte{1: k})
 	mock := kyc.NewMock()
 	enq := &kycQueue{}
+	pay := &payQueue{}
+	dm := httptest.NewServer(darajamock.New(darajamock.Options{ConsumerKey: "ck", ConsumerSecret: "cs", ShortCode: "174379", Passkey: "pk"}))
+	t.Cleanup(dm.Close)
+	dc, err := daraja.New(daraja.Config{BaseURL: dm.URL, ConsumerKey: "ck", ConsumerSecret: "cs", ShortCode: "174379", Passkey: "pk",
+		CallbackURL: "http://api/hooks/mpesa/stk/" + callbackPath}, dm.Client(), clk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := identity.NewService(pool, clk, fakeOIDC{}, aw, identity.Config{
+		AuthKey: []byte("0123456789abcdef0123456789abcdef"), TokenKey: priv, Issuer: "lottery", Audience: "lottery-api",
+		AccessTTL: 10 * time.Minute, RefreshTTL: 30 * 24 * time.Hour, DeviceCap: 2,
+	})
+	rgs := rg.NewService(pool, clk, aw, rg.Config{CoolingOff: 24 * time.Hour})
+	ls := ledger.NewStore()
 	deps := api.Deps{
-		Identity: identity.NewService(pool, clk, fakeOIDC{}, aw, identity.Config{
-			AuthKey: []byte("0123456789abcdef0123456789abcdef"), TokenKey: priv, Issuer: "lottery", Audience: "lottery-api",
-			AccessTTL: 10 * time.Minute, RefreshTTL: 30 * 24 * time.Hour, DeviceCap: 2,
-		}),
-		KYC:     kyc.NewService(pool, clk, mock, kr, []byte("0123456789abcdef0123456789abcdef"), aw, enq),
-		RG:      rg.NewService(pool, clk, aw, rg.Config{CoolingOff: 24 * time.Hour}),
-		Idem:    idempotency.NewStore(pool),
-		Limiter: ratelimit.New(vk.Client(t)),
+		Identity:     ids,
+		KYC:          kyc.NewService(pool, clk, mock, kr, []byte("0123456789abcdef0123456789abcdef"), aw, enq),
+		RG:           rgs,
+		Payments:     payments.NewService(pool, clk, dc, pay, ids, rgs, wallet.NewService(ls), ls, aw, payments.Config{}),
+		CallbackPath: callbackPath,
+		Idem:         idempotency.NewStore(pool),
+		Limiter:      ratelimit.New(vk.Client(t)),
 	}
 	srv := httptest.NewServer(httpx.NewRouterWith(pool, api.Mount(deps)))
 	enq.process = func(ctx context.Context, id string) error { return deps.KYC.Process(ctx, id) }
 	t.Cleanup(srv.Close)
-	return &env{pool: pool, clk: clk, kyc: mock, vk: vk, srv: srv, enq: enq}
+	return &env{pool: pool, clk: clk, kyc: mock, vk: vk, srv: srv, enq: enq, pay: pay}
 }
 
 type resp struct {
@@ -204,6 +245,7 @@ var authedRoutes = []route{
 	{http.MethodGet, "/v1/kyc"}, {http.MethodPost, "/v1/kyc"},
 	{http.MethodGet, "/v1/rg/limits"}, {http.MethodPut, "/v1/rg/limits"},
 	{http.MethodPost, "/v1/rg/timeout"}, {http.MethodPost, "/v1/rg/self-exclusion"},
+	{http.MethodPost, "/v1/payments/topups"}, {http.MethodGet, "/v1/payments/0192f000-0000-7000-8000-000000000000"},
 	{http.MethodPost, "/v1/auth/logout"}, // last: it ends the session used for the valid-token check
 }
 
@@ -536,5 +578,96 @@ func TestAPI_HealthEndpointsStillWork(t *testing.T) {
 		if r.StatusCode != 200 {
 			t.Errorf("%s = %d", p, r.StatusCode)
 		}
+	}
+}
+
+// verified marks the session's account KYC-verified, as the KYC worker would after a registry match.
+func (e *env) verified(t *testing.T, s session) {
+	t.Helper()
+	if _, err := e.pool.Exec(context.Background(), `UPDATE identity.users SET kyc_status = 'verified', national_id_hash = $1 WHERE msisdn = $2`,
+		[]byte(s.msisdn), s.msisdn); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAPI_TopUpStartsAPushAndOnlyItsOwnerCanSeeIt(t *testing.T) {
+	e := setup(t)
+	a, b := e.signIn(t), e.signIn(t)
+	e.verified(t, a)
+	r := e.do(t, http.MethodPost, "/v1/payments/topups", a.access, map[string]any{"amount_kes": 150})
+	if r.Code != http.StatusAccepted || r.Body["status"] != "pending" || r.Body["amount_requested_kes"] != float64(150) {
+		t.Fatalf("top-up: %d %s", r.Code, r.Raw)
+	}
+	id, _ := r.Body["id"].(string)
+	if len(e.pay.jobs) != 1 || e.pay.jobs[0] != "push:"+id {
+		t.Fatalf("jobs = %v", e.pay.jobs)
+	}
+	if r := e.do(t, http.MethodGet, "/v1/payments/"+id, a.access, nil); r.Code != http.StatusOK || r.Body["id"] != id || r.Body["amount_confirmed_kes"] != nil {
+		t.Fatalf("owner get: %d %s", r.Code, r.Raw)
+	}
+	if r := e.do(t, http.MethodGet, "/v1/payments/"+id, b.access, nil); r.Code != http.StatusNotFound {
+		t.Fatalf("other player's payment: %d %s", r.Code, r.Raw)
+	}
+	if r := e.do(t, http.MethodGet, "/v1/payments/nonsense", a.access, nil); r.Code != http.StatusNotFound {
+		t.Fatalf("bad id: %d", r.Code)
+	}
+}
+
+func TestAPI_TopUpErrorMapping(t *testing.T) {
+	e := setup(t)
+	s := e.signIn(t)
+	if r := e.do(t, http.MethodPost, "/v1/payments/topups", s.access, map[string]any{"amount_kes": 100}); r.Code != http.StatusForbidden || !strings.HasSuffix(r.Body["type"].(string), "kyc-required") {
+		t.Fatalf("unverified: %d %s", r.Code, r.Raw)
+	}
+	e.verified(t, s)
+	for _, body := range []any{map[string]any{"amount_kes": 1}, map[string]any{"amount_kes": 250001}, `{"amount_kes":"100"}`, `{"amount_kes":100,"msisdn":"254700000000"}`} {
+		if r := e.do(t, http.MethodPost, "/v1/payments/topups", s.access, body); r.Code != http.StatusBadRequest {
+			t.Errorf("%v: %d %s", body, r.Code, r.Raw)
+		}
+	}
+	if r := e.do(t, http.MethodPut, "/v1/rg/limits", s.access, map[string]any{"period": "daily", "amount_kes": 100}); r.Code != http.StatusOK {
+		t.Fatalf("set limit: %d", r.Code)
+	}
+	r := e.do(t, http.MethodPost, "/v1/payments/topups", s.access, map[string]any{"amount_kes": 101})
+	if r.Code != http.StatusForbidden || !strings.HasSuffix(r.Body["type"].(string), "deposit-limit") {
+		t.Fatalf("over limit: %d %s", r.Code, r.Raw)
+	}
+	if r := e.do(t, http.MethodPost, "/v1/rg/timeout", s.access, map[string]any{"duration": "24h"}); r.Code != http.StatusNoContent {
+		t.Fatalf("timeout: %d", r.Code)
+	}
+	r = e.do(t, http.MethodPost, "/v1/payments/topups", s.access, map[string]any{"amount_kes": 50})
+	if r.Code != http.StatusForbidden || !strings.HasSuffix(r.Body["type"].(string), "restricted") {
+		t.Fatalf("timed out: %d %s", r.Code, r.Raw)
+	}
+}
+
+func (e *env) callback(t *testing.T, path, body string) (int, string) {
+	t.Helper()
+	req, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, e.srv.URL+"/hooks/mpesa/stk/"+path, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	r, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = r.Body.Close() }()
+	raw, _ := io.ReadAll(r.Body)
+	return r.StatusCode, string(raw)
+}
+
+func TestAPI_STKCallbackNeedsTheSecretPathAndIsAcknowledgedWithoutAnIdempotencyKey(t *testing.T) {
+	e := setup(t)
+	body := `{"Body":{"stkCallback":{"CheckoutRequestID":"ws_CO_x","ResultCode":1032,"ResultDesc":"cancelled"}}}`
+	if code, _ := e.callback(t, "wrong", body); code != http.StatusNotFound {
+		t.Fatalf("wrong path: %d", code)
+	}
+	if code, _ := e.callback(t, callbackPath[:63]+"0", body); code != http.StatusNotFound {
+		t.Fatalf("near-miss path: %d", code)
+	}
+	code, raw := e.callback(t, callbackPath, body)
+	if code != http.StatusOK || !strings.Contains(raw, `"ResultCode":0`) {
+		t.Fatalf("callback: %d %s", code, raw)
+	}
+	if code, _ := e.callback(t, callbackPath, `<xml/>`); code != http.StatusBadRequest {
+		t.Fatalf("garbage: %d", code)
 	}
 }

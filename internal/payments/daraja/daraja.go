@@ -45,7 +45,7 @@ const (
 	processingErr = "500.001.1001" // STK query: "The transaction is being processed"
 	// stillProcessing is a result code (answered with HTTP 200) that means only "not finished yet"; treating it as a
 	// failure would fail a payment the customer may still complete. Seen live from the sandbox.
-	stillProcessing = 4999
+	stillProcessing int32 = 4999
 )
 
 var msisdnRE = regexp.MustCompile(`^254[17][0-9]{8}$`)
@@ -295,7 +295,7 @@ const (
 // STKStatus is the answer of the status query.
 type STKStatus struct {
 	State      State
-	ResultCode int
+	ResultCode int32
 	ResultDesc string
 }
 
@@ -342,12 +342,13 @@ func (c *Client) STKQuery(ctx context.Context, checkoutRequestID string) (STKSta
 	return st, nil
 }
 
-// resultCode reads a result code Daraja sends either as a number or as a numeric string.
-func resultCode(raw json.RawMessage) (int, bool) {
+// resultCode reads a result code Daraja sends either as a number or as a numeric string. Anything outside int32 is
+// not a result code.
+func resultCode(raw json.RawMessage) (int32, bool) {
 	s := strings.Trim(string(raw), `"`)
 	if s == "" || s == "null" {
 		return 0, false
 	}
-	n, err := strconv.Atoi(s)
-	return n, err == nil
+	n, err := strconv.ParseInt(s, 10, 32)
+	return int32(n), err == nil
 }

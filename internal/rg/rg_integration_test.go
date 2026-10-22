@@ -250,3 +250,52 @@ func TestLimits_ASecondIncreaseReplacesThePendingOne(t *testing.T) {
 		t.Fatalf("the cancelled 9000 raise took effect: %+v", st)
 	}
 }
+
+func TestAssertDepositAllowed_ChecksEveryLimitInForceAgainstItsOwnWindow(t *testing.T) {
+	e := setup(t)
+	ctx := context.Background()
+	// 12:00 UTC on Wednesday 2026-10-21 is 15:00 in Nairobi
+	if _, err := e.svc.SetLimit(ctx, e.user, rg.Daily, 1000); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.svc.SetLimit(ctx, e.user, rg.Weekly, 1500); err != nil {
+		t.Fatal(err)
+	}
+	var asked []time.Time
+	deposited := func(since time.Time) (int64, error) {
+		asked = append(asked, since)
+		if since.Day() == 21 { // today: 600 deposited; this week (since Monday the 19th): 1200
+			return 600, nil
+		}
+		return 1200, nil
+	}
+	allowed := func(amount int64) error {
+		return pgx.BeginFunc(ctx, e.pool, func(tx pgx.Tx) error { return e.svc.AssertDepositAllowed(ctx, tx, e.user, amount, deposited) })
+	}
+	if err := allowed(300); err != nil {
+		t.Fatalf("300 fits both: %v", err)
+	}
+	var le *rg.LimitError
+	if err := allowed(301); !errors.As(err, &le) || le.Period != rg.Weekly || le.Remaining != 300 {
+		t.Fatalf("301 should break the weekly limit: %v %+v", err, le)
+	}
+	wantDay := time.Date(2026, 10, 21, 0, 0, 0, 0, clock.Nairobi)
+	wantWeek := time.Date(2026, 10, 19, 0, 0, 0, 0, clock.Nairobi)
+	if len(asked) < 2 || !asked[0].Equal(wantDay) || !asked[1].Equal(wantWeek) {
+		t.Fatalf("windows asked = %v", asked)
+	}
+}
+
+func TestAssertDepositAllowed_WithoutLimitsNeverAsksAndAlwaysAllows(t *testing.T) {
+	e := setup(t)
+	ctx := context.Background()
+	err := pgx.BeginFunc(ctx, e.pool, func(tx pgx.Tx) error {
+		return e.svc.AssertDepositAllowed(ctx, tx, e.user, 1_000_000, func(time.Time) (int64, error) {
+			t.Error("asked for deposits although no limit is set")
+			return 0, nil
+		})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}

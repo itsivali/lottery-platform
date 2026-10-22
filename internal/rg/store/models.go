@@ -269,6 +269,14 @@ type PaymentsPayment struct {
 	IdempotencyKey     string
 	CreatedAt          time.Time
 	UpdatedAt          time.Time
+	ResultCode         pgtype.Int4
+}
+
+type PaymentsStkOrphanCallback struct {
+	ID                string
+	CheckoutRequestID string
+	RawPayload        []byte
+	ReceivedAt        time.Time
 }
 
 type PayoutsPayout struct {

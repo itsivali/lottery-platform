@@ -13,6 +13,7 @@ import (
 
 	"github.com/itsivali/lottery-platform/internal/identity"
 	"github.com/itsivali/lottery-platform/internal/kyc"
+	"github.com/itsivali/lottery-platform/internal/payments"
 	"github.com/itsivali/lottery-platform/internal/platform/httpx"
 	"github.com/itsivali/lottery-platform/internal/platform/idempotency"
 	"github.com/itsivali/lottery-platform/internal/platform/ratelimit"
@@ -24,8 +25,12 @@ type Deps struct {
 	Identity *identity.Service
 	KYC      *kyc.Service
 	RG       *rg.Service
-	Idem     *idempotency.Store
-	Limiter  *ratelimit.Limiter
+	// Payments is nil when Daraja is not configured: the routes then answer 503.
+	Payments *payments.Service
+	// CallbackPath is the secret last segment of the STK callback URL.
+	CallbackPath string
+	Idem         *idempotency.Store
+	Limiter      *ratelimit.Limiter
 	// TrustedProxyHeader is the header our load balancer sets with the client address ("" = use the socket address).
 	TrustedProxyHeader string
 	// TrustedProxyHops is how many trusted proxies appended to X-Forwarded-For (ignored for other headers).
@@ -43,6 +48,10 @@ func principalFrom(ctx context.Context) (identity.Principal, bool) {
 func Mount(d Deps) func(chi.Router) {
 	h := &handlers{Deps: d}
 	return func(r chi.Router) {
+		// Daraja's callback: outside /v1 because it carries no token and no Idempotency-Key (it is authenticated by
+		// its secret path and deduplicated by the payments module).
+		r.Post("/hooks/mpesa/stk/{path}", h.stkCallback)
+
 		r.Route("/v1", func(r chi.Router) {
 			r.Use(h.optionalAuth)
 			r.Use(idempotency.Middleware(d.Idem, h.idempotencyPrincipal, idempotency.Options{}))
@@ -65,6 +74,8 @@ func Mount(d Deps) func(chi.Router) {
 				r.Put("/rg/limits", h.rgSetLimit)
 				r.Post("/rg/timeout", h.rgTimeout)
 				r.Post("/rg/self-exclusion", h.rgSelfExclude)
+				r.Post("/payments/topups", h.startTopUp)
+				r.Get("/payments/{id}", h.getPayment)
 			})
 		})
 	}

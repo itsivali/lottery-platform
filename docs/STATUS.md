@@ -3,7 +3,8 @@
 Read this first at the start of every session.
 
 - **Phase:** 1 — Foundations: complete. **Phase 2 — Payments: in progress** (plan and progress in
-  `docs/checkpoints/phase-2.md`). Slice 1 (Daraja client + fault-injecting mock) is on branch `feat/payments-daraja-client`.
+  `docs/checkpoints/phase-2.md`). Slice 1 (Daraja client + mock) is on `feat/payments-daraja-client`; slice 2 (STK
+  top-up end to end, ADR 0006) is on `feat/payments-stk-topup`, stacked on slice 1. Neither is merged yet.
 - **Repo state:** `main` is green as of PR #24.
 - **Deployed (verified 2026-10-22):** Render Blueprint `lottery-platfform` is in sync with `main`. `lottery-api`
   (`https://lottery-api-7jmj.onrender.com`, free, Oregon) is live at `56bcbaf`; `/healthz` and `/readyz` answer 200; `/v1`
@@ -37,12 +38,14 @@ Read this first at the start of every session.
 - **Deposit excise (owner, 2026-10-22): deducted from the deposit** (the wallet shows the deposit and a separate excise
   line). Rate version to load: `deposit_excise` 5% `half_up` effective 2025-07-01 (owner's choice, based on the Finance
   Act 2025; to be confirmed with a tax adviser before production).
-- Daraja: **sandbox only** (shortcode 174379). The owner's sandbox consumer key/secret and passkey exist and work; they go
-  into Render as `sync: false` variables when slice 2 wires payments, never into git.
+- Daraja: **sandbox only** (shortcode 174379). The owner's sandbox consumer key/secret and passkey work: a live KES 1
+  push to the owner's test phone went pending (result 4999) and then paid (2026-10-22). They go into Render as
+  `sync: false` variables, never into git.
 
 ## Next steps
 
-1. Merge slice 1, then slice 2 (STK top-up end to end) per `docs/checkpoints/phase-2.md`.
+1. Merge slice 1, then slice 2. Then in the Render dashboard set `DARAJA_CONSUMER_KEY`, `DARAJA_CONSUMER_SECRET`,
+   `DARAJA_SHORTCODE` (174379) and `DARAJA_PASSKEY` (the sandbox values) to switch top-ups on. Next: slice 3 (C2B).
 2. Fix the trusted-proxy header (above) and re-run both probes.
 3. Owner: choose the national-registry (IPRS) provider.
 4. Later: password reset (STK proof + ID match), passkeys/TOTP, real Play Integrity / App Attest verifiers, nightly

@@ -29,7 +29,7 @@ pending until completed (deterministic tests) or auto-completed (compose), with 
 outage, cancelled/failed result codes, lost and duplicated callbacks, a different paid amount, masked phone.
 
 ### Slice 2 — STK top-up end to end
-Config (`DARAJA_*`, callback path token, `DEPOSIT_EXCISE=deduct|absorb`), `POST /v1/payments/topups` (eligibility via
+Config (`DARAJA_*`, callback path token; excise is deducted per the owner's decision), `POST /v1/payments/topups` (eligibility via
 `AssertCanTopUp`, RG deposit limit, amount bounds, idempotency), `stk.push` job, public callback endpoint (secret path
 token, raw body stored, always 200 to Daraja), `stk.verify` job (query → credit via `ledger.Deposit` + `wallet.Apply`
 + `MarkPhoneVerified` in one transaction), expiry sweeper for pushes that never resolve, `GET /v1/payments/{id}`.
@@ -51,11 +51,44 @@ WebSocket (or SSE) push of top-up results to the app; e2e journey against compos
 
 ### Slice 1
 - `internal/payments/daraja`: 90.2% coverage; `internal/payments/darajamock`: 87.9%. Lint clean, race-clean.
-- The owner's sandbox app credentials obtain an OAuth token from `sandbox.safaricom.co.ke` (checked 2026-10-22; no push
-  was sent).
+- The owner's sandbox app credentials obtain an OAuth token from `sandbox.safaricom.co.ke` (checked 2026-10-22).
 - Deviation: the client tests and code were written together before the first run, so the red run was not observed.
 - **Live sandbox round trip (2026-10-22):** a KES 1 STK push to the owner's test phone was accepted, the first status
   query answered HTTP 200 with `ResultCode 4999` ("The transaction is still under processing"), and after the owner
   approved the prompt the query answered `ResultCode 0`. The client had mapped 4999 to *failed*, which would have failed
   payments that customers were still completing; a failing test reproduced it, the client now maps it to pending, and
   the mock can answer pending queries the same way (`PendingAs4999`).
+- Also fixed: `TestAllow_WindowSlides` (rate limiter) raced its own first call with a 300ms window; this was the
+  unexplained integration flake noted in the phase 1 checkpoint (reproduced 1 in 3 under load; 5/5 after the fix).
+
+### Slice 2
+Design decisions are in ADR 0006. What landed:
+
+- Migration `00015`: `unconfirmed` payment status (paid per the query but no receipt), `result_code`,
+  `payments.stk_orphan_callbacks` (append-only), and the `deposit_excise` 5% `half_up` version from 2025-07-01.
+- `internal/payments`: `StartTopUp` (eligibility, restrictions, deposit limits counting in-flight top-ups, excise rule
+  present, per-player advisory lock, idempotent by key), `Push` (never retried), `HandleCallback` (stores, never
+  credits), `Verify` (status query is the proof; credit from the callback's amount and receipt, net of excise; phone
+  proved in a savepoint), `Sweep`, River jobs with per-(payment, source) uniqueness and a one-minute periodic sweep.
+- `identity.AssertCanTopUp` now returns the claimed number (the push target); `rg.AssertDepositAllowed` checks every
+  limit in force against its own Nairobi window.
+- API: `POST /v1/payments/topups`, `GET /v1/payments/{id}`, `POST /hooks/mpesa/stk/{path}`; OpenAPI updated and valid.
+- Config: `DARAJA_*` all-or-nothing, sandbox default, production refused without `DARAJA_ALLOW_PRODUCTION=true`,
+  callback origin from `PUBLIC_BASE_URL` or Render's `RENDER_EXTERNAL_URL`. Blueprint and compose updated; `make e2e`
+  now tops up through the Daraja mock.
+- Tests (integration, real Postgres): credited net of excise with the phone proved; refused up front (amounts, KYC,
+  self-exclusion, limits with in-flight top-ups); unavailable without Daraja or an excise version; same key same
+  payment; cancelled prompt; duplicate callbacks plus 10 racing verifications credit once; forged callback not credited
+  until the query agrees; lost callback becomes unconfirmed; credited amount is the paid amount; masked payer number;
+  number already proved elsewhere is credited but not verified; push outage never retried; receipt replay refused;
+  orphan callbacks kept; sweep; IDOR on `GET`. API: auth and idempotency sweeps include the new routes, error mapping,
+  secret callback path. App: the full journey (sign-up, KYC, top-up, credited 95, phone proved) through the real River
+  workers and an HTTP callback from the mock.
+- Found in self-review, fixed test-first: a callback that arrives before the push job has recorded the checkout id is
+  stored as an orphan; verification now also looks there, so such a payment is credited instead of waiting 15 minutes
+  and ending `unconfirmed`. Also added: a payer number that differs from the push target credits but proves nothing.
+- Hand-run mutation check on `internal/payments` (integration tests): 5 of 6 killed (excise mode, receipt-reuse
+  check, pending treated as paid, payer-number check, push retried). Survivor: removing the final-state re-check
+  inside the credit transaction; a double credit is still impossible there because the deposit journal is unique per
+  payment (`ledger_journals_event_key`), so the second attempt errors and retries into the final-state check.
+

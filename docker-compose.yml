@@ -25,6 +25,8 @@ services:
     ports: ["8081:8080"]
   daraja-mock:
     build: { context: ., target: mock, args: { TARGET: mocks/daraja } }
+    # every prompt is approved two seconds after it is sent; POST /__mock/fault injects failures
+    environment: { MOCK_AUTO_COMPLETE: 2s }
     ports: ["8090:8080"]
   kyc-mock:
     build: { context: ., target: mock, args: { TARGET: mocks/stub } }
@@ -56,6 +58,13 @@ services:
       KYC_API_URL: http://kyc-mock:8080/verify
       KYC_API_KEY: local
       WORKERS_IN_PROCESS: "true"
+      DARAJA_BASE_URL: http://daraja-mock:8080
+      DARAJA_CONSUMER_KEY: local
+      DARAJA_CONSUMER_SECRET: local
+      DARAJA_SHORTCODE: "174379"
+      DARAJA_PASSKEY: local
+      DARAJA_CALLBACK_TOKEN: local-dev-only-callback-token-000000
+      PUBLIC_BASE_URL: http://api:8080
     ports: ["8080:8080"]
     depends_on:
       migrate: { condition: service_completed_successfully }

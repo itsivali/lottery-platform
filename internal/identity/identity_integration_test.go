@@ -276,7 +276,14 @@ func TestEligibility_TopUpNeedsAVerifiedIDAndPlayAlsoNeedsAProvedPhone(t *testin
 	tok := e.login(t, m, phone)
 	p, _ := e.svc.Authenticate(ctx, tok.Access)
 	topUp := func() error {
-		return pgx.BeginFunc(ctx, e.pool, func(tx pgx.Tx) error { return e.svc.AssertCanTopUp(ctx, tx, p.UserID) })
+		return pgx.BeginFunc(ctx, e.pool, func(tx pgx.Tx) error {
+			// the claimed number is where the payment prompt goes: approving it is what proves the phone
+			got, err := e.svc.AssertCanTopUp(ctx, tx, p.UserID)
+			if err == nil && got != m {
+				t.Errorf("top-up phone = %q, want the claimed %q", got, m)
+			}
+			return err
+		})
 	}
 	play := func() error {
 		return pgx.BeginFunc(ctx, e.pool, func(tx pgx.Tx) error { return e.svc.AssertCanPlay(ctx, tx, p.UserID) })

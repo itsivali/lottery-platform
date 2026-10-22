@@ -23,6 +23,9 @@ import (
 	"github.com/itsivali/lottery-platform/internal/audit"
 	"github.com/itsivali/lottery-platform/internal/identity"
 	"github.com/itsivali/lottery-platform/internal/kyc"
+	"github.com/itsivali/lottery-platform/internal/ledger"
+	"github.com/itsivali/lottery-platform/internal/payments"
+	"github.com/itsivali/lottery-platform/internal/payments/daraja"
 	"github.com/itsivali/lottery-platform/internal/platform/clock"
 	"github.com/itsivali/lottery-platform/internal/platform/config"
 	"github.com/itsivali/lottery-platform/internal/platform/crypto"
@@ -30,6 +33,7 @@ import (
 	"github.com/itsivali/lottery-platform/internal/platform/idempotency"
 	"github.com/itsivali/lottery-platform/internal/platform/ratelimit"
 	"github.com/itsivali/lottery-platform/internal/rg"
+	"github.com/itsivali/lottery-platform/internal/wallet"
 )
 
 const (
@@ -42,11 +46,12 @@ type App struct {
 	// Mount registers the /v1 routes; it is nil when the API is not configured (health probes only).
 	Mount func(chi.Router)
 
-	cfg     config.Config
-	pool    *pgxpool.Pool
-	valkey  valkey.Client
-	kyc     *kyc.Service
-	workers *river.Client[pgx.Tx]
+	cfg      config.Config
+	pool     *pgxpool.Pool
+	valkey   valkey.Client
+	kyc      *kyc.Service
+	payments *payments.Service
+	workers  *river.Client[pgx.Tx]
 }
 
 // New builds the application. With the API unconfigured it returns an App that serves nothing beyond the probes.
@@ -89,15 +94,32 @@ func New(ctx context.Context, cfg config.Config, pool *pgxpool.Pool) (*App, erro
 		AccessTTL: 10 * time.Minute, RefreshTTL: 30 * 24 * time.Hour, DeviceCap: 2,
 	})
 
+	rgSvc := rg.NewService(pool, clk, aw, rg.Config{CoolingOff: 24 * time.Hour})
+
+	// Without Daraja configuration the payments service still answers reads but refuses top-ups (fail closed).
+	var dc payments.Daraja
+	if p := cfg.Payments; p.Enabled {
+		client, err := daraja.New(daraja.Config{
+			BaseURL: p.BaseURL, ConsumerKey: p.ConsumerKey, ConsumerSecret: p.ConsumerSecret, ShortCode: p.ShortCode,
+			Passkey: p.Passkey, CallbackURL: p.CallbackURL(), AllowProduction: p.AllowProduction,
+		}, &http.Client{Timeout: 35 * time.Second}, clock.Wall{})
+		if err != nil {
+			return nil, err
+		}
+		dc = client
+	}
+	ls := ledger.NewStore()
+	a.payments = payments.NewService(pool, clk, dc, payments.NewRiverEnqueuer(insertOnly), idSvc, rgSvc, wallet.NewService(ls), ls, aw, payments.Config{})
+
 	a.Mount = api.Mount(api.Deps{
-		Identity: idSvc, KYC: a.kyc,
-		RG:                 rg.NewService(pool, clk, aw, rg.Config{CoolingOff: 24 * time.Hour}),
+		Identity: idSvc, KYC: a.kyc, RG: rgSvc, Payments: a.payments, CallbackPath: cfg.Payments.CallbackPath,
 		Idem:               idempotency.NewStore(pool),
 		Limiter:            ratelimit.New(vk),
 		TrustedProxyHeader: c.TrustedProxyHeader, TrustedProxyHops: c.TrustedProxyHops,
 	})
 	slog.InfoContext(ctx, "v1 API enabled", "trusted_proxy_header", c.TrustedProxyHeader, "trusted_proxy_hops", c.TrustedProxyHops,
-		"kyc_registry", c.KYCURL != "", "google", c.GoogleClientID != "", "apple", c.AppleClientID != "")
+		"kyc_registry", c.KYCURL != "", "google", c.GoogleClientID != "", "apple", c.AppleClientID != "",
+		"payments", cfg.Payments.Enabled, "daraja", cfg.Payments.BaseURL)
 	return a, nil
 }
 
@@ -109,8 +131,9 @@ func (a *App) StartWorkers(ctx context.Context) error {
 	workers := river.NewWorkers()
 	// the worker side needs the verification service without the enqueuer; it shares provider, keys and pool
 	kyc.AddWorkers(workers, a.kyc)
+	payments.AddWorkers(workers, a.payments)
 	wc, err := river.NewClient(riverpgxv5.New(a.pool), &river.Config{
-		Schema: db.RiverSchema, Workers: workers,
+		Schema: db.RiverSchema, Workers: workers, PeriodicJobs: payments.PeriodicJobs(),
 		Queues: map[string]river.QueueConfig{river.QueueDefault: {MaxWorkers: 10}},
 	})
 	if err != nil {
