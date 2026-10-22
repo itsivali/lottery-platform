@@ -388,7 +388,10 @@ components:
       required: [id, status, amount_requested_kes, amount_confirmed_kes, created_at]
       properties:
         id: { type: string }
-        status: { type: string, enum: [pending, credited, failed] }
+        status:
+          type: string
+          enum: [pending, credited, failed, reversed]
+          description: "`reversed`: M-Pesa took the payment back; what the player received was taken back (or is owed)."
         amount_requested_kes: { type: integer }
         amount_confirmed_kes:
           type: [integer, "null"]

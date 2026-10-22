@@ -69,9 +69,14 @@ func run(log *slog.Logger) error {
 		go serveMetrics(log, cfg.MetricsAddr, tel)
 	}
 
+	handler := httpx.NewRouterWith(pool, application.Mount)
+	if cfg.LogClientIPHeaders {
+		log.Warn("logging client address headers on every request (diagnostic; switch LOG_CLIENT_IP_HEADERS off when done)")
+		handler = httpx.LogClientIPHeaders(log, handler)
+	}
 	srv := &http.Server{
 		Addr:              cfg.HTTPAddr,
-		Handler:           tel.Middleware(httpx.NewRouterWith(pool, application.Mount)),
+		Handler:           tel.Middleware(handler),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	errc := make(chan error, 1)

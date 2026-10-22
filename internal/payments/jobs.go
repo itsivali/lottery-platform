@@ -25,6 +25,12 @@ type VerifyArgs struct {
 // Kind implements river.JobArgs.
 func (VerifyArgs) Kind() string { return "payments.stk_verify" }
 
+// ReconcileArgs runs the daily internal reconciliation.
+type ReconcileArgs struct{}
+
+// Kind implements river.JobArgs.
+func (ReconcileArgs) Kind() string { return "payments.reconcile" }
+
 // SweepArgs looks for payments that have been pending too long.
 type SweepArgs struct{}
 
@@ -86,6 +92,16 @@ func (w *sweepWorker) Work(ctx context.Context, _ *river.Job[SweepArgs]) error {
 	return w.svc.Sweep(ctx)
 }
 
+type reconcileWorker struct {
+	river.WorkerDefaults[ReconcileArgs]
+	svc *Service
+}
+
+func (w *reconcileWorker) Work(ctx context.Context, _ *river.Job[ReconcileArgs]) error {
+	_, err := w.svc.Reconcile(ctx)
+	return err
+}
+
 // SweepEvery is how often the sweeper looks for stuck payments.
 const SweepEvery = time.Minute
 
@@ -94,10 +110,18 @@ func AddWorkers(ws *river.Workers, svc *Service) {
 	river.AddWorker(ws, &pushWorker{svc: svc})
 	river.AddWorker(ws, &verifyWorker{svc: svc})
 	river.AddWorker(ws, &sweepWorker{svc: svc})
+	river.AddWorker(ws, &reconcileWorker{svc: svc})
 }
+
+// ReconcileEvery is how often the internal reconciliation runs.
+const ReconcileEvery = 24 * time.Hour
 
 // PeriodicJobs are the scheduled payment jobs.
 func PeriodicJobs() []*river.PeriodicJob {
-	return []*river.PeriodicJob{river.NewPeriodicJob(river.PeriodicInterval(SweepEvery),
-		func() (river.JobArgs, *river.InsertOpts) { return SweepArgs{}, nil }, &river.PeriodicJobOpts{ID: "payments.sweep"})}
+	return []*river.PeriodicJob{
+		river.NewPeriodicJob(river.PeriodicInterval(SweepEvery),
+			func() (river.JobArgs, *river.InsertOpts) { return SweepArgs{}, nil }, &river.PeriodicJobOpts{ID: "payments.sweep"}),
+		river.NewPeriodicJob(river.PeriodicInterval(ReconcileEvery),
+			func() (river.JobArgs, *river.InsertOpts) { return ReconcileArgs{}, nil }, &river.PeriodicJobOpts{ID: "payments.reconcile", RunOnStart: true}),
+	}
 }

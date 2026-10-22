@@ -270,6 +270,15 @@ type PaymentsPayment struct {
 	CreatedAt          time.Time
 	UpdatedAt          time.Time
 	ResultCode         *int32
+	ReversedAt         *time.Time
+	ReversalReason     *string
+}
+
+type PaymentsReconciliationRun struct {
+	ID     string
+	RanAt  time.Time
+	Ok     bool
+	Report []byte
 }
 
 type PaymentsStkOrphanCallback struct {
