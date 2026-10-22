@@ -277,3 +277,45 @@ func post(t *testing.T, srv *httptest.Server, path, body string) (*http.Response
 	}
 	return srv.Client().Do(req)
 }
+
+func TestMock_ReportsDarajasFailureCodesAndRefusesMalformedRequests(t *testing.T) {
+	for code, desc := range map[int]string{1: "insufficient", 1037: "cannot be reached", 9999: "failed"} {
+		e := setup(t)
+		e.mock.SetNextFault(darajamock.Fault{ResultCode: code})
+		res := push(t, e, 10)
+		if err := e.mock.Complete(context.Background(), res.CheckoutRequestID); err != nil {
+			t.Fatal(err)
+		}
+		st, err := e.client.STKQuery(context.Background(), res.CheckoutRequestID)
+		if err != nil || st.State != daraja.Failed || int(st.ResultCode) != code || !strings.Contains(strings.ToLower(st.ResultDesc), desc) {
+			t.Errorf("code %d: %+v %v", code, st, err)
+		}
+	}
+	e := setup(t)
+	srv := httptest.NewServer(e.mock)
+	defer srv.Close()
+	for name, req := range map[string]func() *http.Request{
+		"no token": func() *http.Request {
+			r, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, srv.URL+"/mpesa/stkpush/v1/processrequest", strings.NewReader(`{}`))
+			return r
+		},
+		"not json": func() *http.Request {
+			r, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, srv.URL+"/mpesa/stkpush/v1/processrequest", strings.NewReader(`<x>`))
+			r.Header.Set("Authorization", "Bearer mock-access-token")
+			return r
+		},
+		"complete unknown": func() *http.Request {
+			r, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, srv.URL+"/__mock/complete/nope", nil)
+			return r
+		},
+	} {
+		resp, err := srv.Client().Do(req())
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode < 400 {
+			t.Errorf("%s: status %d, want a refusal", name, resp.StatusCode)
+		}
+	}
+}

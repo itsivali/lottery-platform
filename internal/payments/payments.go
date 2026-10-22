@@ -60,6 +60,8 @@ func publicStatus(s string) string {
 	switch s {
 	case "credited":
 		return StatusCredited
+	case "reversed":
+		return StatusReversed
 	case "failed", "cancelled", "expired":
 		return StatusFailed
 	default: // initiated, stk_sent, callback_received, verified, unconfirmed: still being settled
@@ -69,7 +71,7 @@ func publicStatus(s string) string {
 
 func final(s string) bool {
 	switch s {
-	case "credited", "failed", "cancelled", "expired", "unconfirmed":
+	case "credited", "failed", "cancelled", "expired", "unconfirmed", "reversed":
 		return true
 	}
 	return false
@@ -111,9 +113,12 @@ type RG interface {
 	AssertDepositAllowed(ctx context.Context, tx pgx.Tx, userID string, amount int64, deposited func(since time.Time) (int64, error)) error
 }
 
-// Wallet applies postings.
+// Wallet applies postings and handles reversals and player debt.
 type Wallet interface {
 	Apply(ctx context.Context, tx pgx.Tx, p ledger.Posting) (int64, error)
+	RecoverDebt(ctx context.Context, tx pgx.Tx, user, paymentID string) (int64, error)
+	Debt(ctx context.Context, tx pgx.Tx, user string) (int64, error)
+	ReverseDeposit(ctx context.Context, tx pgx.Tx, paymentID, user string, gross, exciseDeducted int64) (ledger.Posting, int64, error)
 }
 
 // TaxRules returns the rule version in force.
@@ -384,25 +389,47 @@ func (s *Service) credit(ctx context.Context, paymentID string, expired bool) (t
 		if used {
 			return s.settle(ctx, tx, p.UserID, paymentID, "unconfirmed", "receipt_reused", nil, now)
 		}
-		rule, err := s.rules.ActiveRule(ctx, tx, exciseCode, now)
-		if err != nil {
-			return fmt.Errorf("payments: excise rule: %w", err)
-		}
-		posting, err := ledger.Deposit(paymentID, p.UserID, cb.AmountKES, rule, deductExcise)
-		if err != nil {
-			return err
-		}
-		if _, err := s.wallet.Apply(ctx, tx, posting); err != nil {
-			return err
-		}
-		if err := q.MarkCredited(ctx, store.MarkCreditedParams{AmountKes: &cb.AmountKES, Receipt: &cb.Receipt, At: now, ID: paymentID}); err != nil {
-			return err
-		}
-		phone := s.provePhone(ctx, tx, p.UserID, *p.Msisdn, cb.MSISDN)
-		return s.audit.Record(ctx, tx, audit.Event{ActorType: audit.System, Action: "payment.topup.credited", EntityType: "payment", EntityID: paymentID,
-			Details: map[string]any{"amount_kes": cb.AmountKES, "receipt": cb.Receipt, "phone_proof": phone}})
+		return s.creditPayment(ctx, tx, creditInput{paymentID: paymentID, user: p.UserID, target: *p.Msisdn, amount: cb.AmountKES,
+			receipt: cb.Receipt, payer: cb.MSISDN, now: now, actor: audit.Event{ActorType: audit.System}})
 	})
 	return retry, err
+}
+
+type creditInput struct {
+	paymentID, user, target string
+	amount                  int64
+	receipt, payer          string
+	now                     time.Time
+	actor                   audit.Event // who credits: the system after a status query, or an operator from a statement
+}
+
+// creditPayment posts a confirmed top-up: the deposit net of excise, recovery of any debt the player owes, the payment
+// marked credited, the phone proof and the audit record, all in the caller's transaction.
+func (s *Service) creditPayment(ctx context.Context, tx pgx.Tx, in creditInput) error {
+	q := store.New(tx)
+	rule, err := s.rules.ActiveRule(ctx, tx, exciseCode, in.now)
+	if err != nil {
+		return fmt.Errorf("payments: excise rule: %w", err)
+	}
+	posting, err := ledger.Deposit(in.paymentID, in.user, in.amount, rule, deductExcise)
+	if err != nil {
+		return err
+	}
+	if _, err := s.wallet.Apply(ctx, tx, posting); err != nil {
+		return err
+	}
+	recovered, err := s.wallet.RecoverDebt(ctx, tx, in.user, in.paymentID)
+	if err != nil {
+		return err
+	}
+	if err := q.MarkCredited(ctx, store.MarkCreditedParams{AmountKes: &in.amount, Receipt: &in.receipt, At: in.now, ID: in.paymentID}); err != nil {
+		return err
+	}
+	phone := s.provePhone(ctx, tx, in.user, in.target, in.payer)
+	ev := in.actor
+	ev.Action, ev.EntityType, ev.EntityID = "payment.topup.credited", "payment", in.paymentID
+	ev.Details = map[string]any{"amount_kes": in.amount, "receipt": in.receipt, "phone_proof": phone, "debt_recovered_kes": recovered}
+	return s.audit.Record(ctx, tx, ev)
 }
 
 // provePhone records that the player controls the push target: the prompt reached that phone and was approved with

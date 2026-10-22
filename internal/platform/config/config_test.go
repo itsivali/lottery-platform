@@ -60,3 +60,15 @@ func TestLoad_TelemetrySettings(t *testing.T) {
 		t.Errorf("overrides: %+v (METRICS_ADDR=off must disable the listener)", cfg)
 	}
 }
+
+func TestLoad_ClientIPHeaderLoggingIsOffUnlessAskedFor(t *testing.T) {
+	t.Setenv("DATABASE_URL", "postgres://x")
+	t.Setenv("LOG_CLIENT_IP_HEADERS", "")
+	if cfg, err := config.Load(); err != nil || cfg.LogClientIPHeaders {
+		t.Fatalf("default: %v %v", cfg.LogClientIPHeaders, err)
+	}
+	t.Setenv("LOG_CLIENT_IP_HEADERS", "true")
+	if cfg, err := config.Load(); err != nil || !cfg.LogClientIPHeaders {
+		t.Fatalf("enabled: %v %v", cfg.LogClientIPHeaders, err)
+	}
+}

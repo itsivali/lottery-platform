@@ -160,9 +160,10 @@ func TestPostingRules_EveryJournalBalancesAndMatchesTheWallet(t *testing.T) {
 		{"withdrawal failed", func() (ledger.Posting, error) {
 			return ledger.WithdrawalFailed(ref, user, 500, rate(t, "0.2", ledger.HalfUp))
 		}, 500},
-		{"deposit reversal fully covered", func() (ledger.Posting, error) { return ledger.DepositReversal(ref, user, 400, 1000) }, -400},
-		{"deposit reversal partly covered", func() (ledger.Posting, error) { return ledger.DepositReversal(ref, user, 400, 150) }, -150},
-		{"deposit reversal with empty wallet", func() (ledger.Posting, error) { return ledger.DepositReversal(ref, user, 400, 0) }, 0},
+		{"deposit reversal fully covered", func() (ledger.Posting, error) { return ledger.DepositReversal(ref, user, 400, 0, 1000) }, -400},
+		{"deposit reversal partly covered", func() (ledger.Posting, error) { return ledger.DepositReversal(ref, user, 400, 0, 150) }, -150},
+		{"deposit reversal with empty wallet", func() (ledger.Posting, error) { return ledger.DepositReversal(ref, user, 400, 0, 0) }, 0},
+		{"debt recovery", func() (ledger.Posting, error) { return ledger.DebtRecovery(ref, user, 250) }, -250},
 	}
 	for _, c := range cases {
 		p, err := c.build()
@@ -183,7 +184,7 @@ func TestPostingRules_EveryJournalBalancesAndMatchesTheWallet(t *testing.T) {
 }
 
 func TestDepositReversal_ShortfallBecomesPlayerDebt(t *testing.T) {
-	p, err := ledger.DepositReversal(ref, user, 400, 150)
+	p, err := ledger.DepositReversal(ref, user, 400, 0, 150)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -195,6 +196,83 @@ func TestDepositReversal_ShortfallBecomesPlayerDebt(t *testing.T) {
 	}
 	if debt != 250 {
 		t.Fatalf("player debt = %d, want 250", debt)
+	}
+}
+
+// A deposit whose excise was deducted gave the player gross - excise; a reversal takes back only that. The excise
+// already owed to KRA becomes the operator's cost (open owner/tax decision: is excise refundable on reversals?).
+func TestDepositReversal_TakesBackOnlyWhatThePlayerReceived(t *testing.T) {
+	p, err := ledger.DepositReversal(ref, user, 100, 5, 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := walletSum(p); got != -95 {
+		t.Fatalf("wallet movement = %d, want -95 (the 5 excise was never in the wallet)", got)
+	}
+	var clearing, exciseExpense int64
+	for _, e := range p.Journal.Entries {
+		switch {
+		case e.Account == ledger.MpesaClearing && e.Dir == ledger.Credit:
+			clearing += e.AmountKES
+		case e.Account == ledger.ExciseExpense && e.Dir == ledger.Debit:
+			exciseExpense += e.AmountKES
+		}
+	}
+	if clearing != 100 || exciseExpense != 5 {
+		t.Fatalf("clearing credited %d (want the full 100 M-Pesa took back), excise expense %d (want 5)", clearing, exciseExpense)
+	}
+	short, err := ledger.DepositReversal(ref, user, 100, 5, 30)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var debt int64
+	for _, e := range short.Journal.Entries {
+		if e.Account == ledger.PlayerDebt {
+			debt += e.AmountKES
+		}
+	}
+	if walletSum(short) != -30 || debt != 65 {
+		t.Fatalf("partly covered: wallet %d debt %d, want -30 and 65", walletSum(short), debt)
+	}
+}
+
+// Debt is per player: the PLAYER_DEBT entries carry the user, so one player's debt can be totalled and recovered.
+func TestPlayerDebt_IsBookedAgainstThePlayerAndRecoveredFromTheirWallet(t *testing.T) {
+	rev, err := ledger.DepositReversal(ref, user, 400, 0, 150)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec, err := ledger.DebtRecovery("pay-2", user, 250)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var debt int64
+	for _, p := range []ledger.Posting{rev, rec} {
+		for _, e := range p.Journal.Entries {
+			if e.Account != ledger.PlayerDebt {
+				continue
+			}
+			if e.UserID != user {
+				t.Fatalf("%s: PLAYER_DEBT entry not booked against the player: %+v", p.Journal.Kind, e)
+			}
+			if e.Dir == ledger.Debit {
+				debt += e.AmountKES
+			} else {
+				debt -= e.AmountKES
+			}
+		}
+	}
+	if debt != 0 {
+		t.Fatalf("debt after full recovery = %d", debt)
+	}
+	if rec.Journal.Kind != "debt_recovery" || rec.Journal.RefType != "payment" || rec.Journal.RefID != "pay-2" || rec.UserID != user {
+		t.Fatalf("recovery journal = %+v", rec.Journal)
+	}
+	if len(rec.WalletTxs) != 1 || rec.WalletTxs[0] != (ledger.WalletTx{Kind: "debt_recovery", AmountKES: -250}) {
+		t.Fatalf("recovery wallet transactions = %+v", rec.WalletTxs)
+	}
+	if _, err := ledger.DebtRecovery(ref, user, 0); err == nil {
+		t.Fatal("DebtRecovery(0) accepted")
 	}
 }
 
@@ -269,7 +347,10 @@ func TestPostingRules_Property_AnyAmountAndRuleBalances(t *testing.T) {
 			func() (ledger.Posting, error) { return ledger.Deposit(ref, user, amt, rl, false) },
 			func() (ledger.Posting, error) { return ledger.Withdrawal(ref, user, amt, rl) },
 			func() (ledger.Posting, error) { return ledger.WithdrawalFailed(ref, user, amt, rl) },
-			func() (ledger.Posting, error) { return ledger.DepositReversal(ref, user, amt, bal) },
+			func() (ledger.Posting, error) {
+				return ledger.DepositReversal(ref, user, amt, rapid.Int64Range(0, amt).Draw(t, "excise"), bal)
+			},
+			func() (ledger.Posting, error) { return ledger.DebtRecovery(ref, user, amt) },
 			func() (ledger.Posting, error) { return ledger.PrizePayout(ref, "daily", amt, rl) },
 		}
 		for i, b := range builds {
@@ -306,10 +387,16 @@ func TestPostingRules_RejectOutOfRangeAmountsAndUnknownRounding(t *testing.T) {
 	if _, err := ledger.WithdrawalFailed(ref, user, 0, none); err == nil {
 		t.Error("WithdrawalFailed(0) accepted")
 	}
-	if _, err := ledger.DepositReversal(ref, user, 0, 10); err == nil {
+	if _, err := ledger.DepositReversal(ref, user, 0, 0, 10); err == nil {
 		t.Error("DepositReversal(0) accepted")
 	}
-	if _, err := ledger.DepositReversal(ref, user, 10, -1); err == nil {
+	if _, err := ledger.DepositReversal(ref, user, 10, 11, 10); err == nil {
+		t.Error("DepositReversal with excise above the gross accepted")
+	}
+	if _, err := ledger.DepositReversal(ref, user, 10, -1, 10); err == nil {
+		t.Error("DepositReversal with negative excise accepted")
+	}
+	if _, err := ledger.DepositReversal(ref, user, 10, 0, -1); err == nil {
 		t.Error("DepositReversal with negative balance accepted")
 	}
 	if _, err := ledger.PrizePayout(ref, "daily", 0, none); err == nil {
