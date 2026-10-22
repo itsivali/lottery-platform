@@ -19,12 +19,12 @@ Read this first at the start of every session.
    `X-Forwarded-For` entry was a rotating Render balancer address; the api now reads `CF-Connecting-IP`, which
    Cloudflare refuses to accept from clients. **Probe 1 passed** (60 × 401 then 429 with forged `X-Forwarded-For`).
    Remaining: **probe 2** from a second network (5 failed logins from a phone on mobile data must all be 401, not 429).
-2. **Free Postgres:** expires 2026-11-20. **Automated** by `db-rotate` (`docs/runbooks/free-database-rotation.md`): daily
-   check, rotation (backup, verify, recreate, restore, switch) when 3 days or fewer remain. **Needs the `database`
-   environment secrets `RENDER_API_KEY` and `DB_BACKUP_PASSPHRASE`**, then a manual `dry-run` once. Upgrading the
-   database to a paid plan ends the need for it.
-3. **Database roles:** answered. Render's user has `CREATEROLE` and the four app roles exist (role mode). After the
-   first rotation the restored instance runs in single-role mode (documented in the rotation runbook).
+2. **Free Postgres:** rotated on 2026-10-22 (first supervised run, data intact); now expires **2026-11-21** and the next
+   rotation runs by itself around 2026-11-18. **Automated** by `db-rotate` (`docs/runbooks/free-database-rotation.md`): daily
+   check, rotation (backup, verify, recreate, restore, switch) when 3 days or fewer remain. Secrets are set; the
+   passphrase must stay in the owner's password manager. Upgrading the database to a paid plan ends the need for it.
+3. **Database roles:** Render's user has `CREATEROLE`; the original instance had the four app roles. Since the rotation
+   the instance runs in **single-role mode** (no `app_*` roles; every trigger and constraint holds), as documented.
 
 ## Decisions taken (see ADR 0005)
 
@@ -46,7 +46,7 @@ Read this first at the start of every session.
 1. Phase 2 without a paybill: reconciliation and reversals, realtime confirmation. Sandbox top-ups are live (2026-10-22): the Daraja sandbox credentials are set on Render and the api
    logs `payments=true`. The owner's test account (0796992457) is KYC-verified with provider
    `owner-attested-2026-10-22` (no registry vendor yet); its phone is proved by its first approved top-up prompt.
-2. Owner: set the `database` environment secrets, run `db-rotate` with `dry-run`, and run trusted-proxy probe 2.
+2. Owner: run trusted-proxy probe 2 from a second network.
 3. Owner: choose the national-registry (IPRS) provider.
 4. Later: password reset (STK proof + ID match), passkeys/TOTP, real Play Integrity / App Attest verifiers, nightly
    mutation testing of the integration-backed packages.
