@@ -10,7 +10,7 @@ Read this first at the start of every session.
 - **Repo state:** the GitHub repository was **deleted and recreated on 2026-10-22** (to drop co-author attribution that
   GitHub kept in old PR refs and caches) and `main` was pushed from the local clone. PR numbers below #8 in these docs
   refer to the deleted repository. Commits and PRs carry only the owner's name.
-- **Deployed (verified 2026-10-24):** Blueprint `lottery-platfform`; `lottery-api` (`https://lottery-api-7jmj.onrender.com`,
+- **Deployed (verified 2026-10-24):** Blueprint `lottery-plarform` (database, Key Value); `lottery-api` (recreated 2026-10-24, `srv-dbe9gavb9u1s738ttucg`) (`https://lottery-api-4u9g.onrender.com`,
   free, Oregon) builds from `main` (repository reconnected by the owner on 2026-10-24); migrations at version 17;
   sandbox top-ups and paybill on (`payments=true paybill=true`, shortcode 600992); client address from
   `CF-Connecting-IP`. Free Postgres `lottery-db` (PG 18) and Key Value `lottery-cache`.
