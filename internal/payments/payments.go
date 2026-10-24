@@ -238,6 +238,27 @@ func (s *Service) Get(ctx context.Context, userID, id string) (TopUp, error) {
 	return TopUp{ID: p.ID, Status: publicStatus(p.Status), AmountRequestedKES: p.AmountRequestedKes, AmountConfirmedKES: p.AmountConfirmedKes, CreatedAt: p.CreatedAt}, nil
 }
 
+// RecentWindow is how far back Recent looks for payments that already settled.
+const RecentWindow = 15 * time.Minute
+
+// Recent returns the player's payments that are still being settled or changed within RecentWindow, newest first.
+// A live stream starts from it, so a top-up that settled between its request and the stream's start is not missed.
+func (s *Service) Recent(ctx context.Context, userID string) ([]TopUp, error) {
+	now, err := s.clk.Now(ctx, s.pool)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := store.New(s.pool).RecentPayments(ctx, store.RecentPaymentsParams{UserID: userID, Since: now.Add(-RecentWindow)})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]TopUp, 0, len(rows))
+	for _, p := range rows {
+		out = append(out, TopUp{ID: p.ID, Status: publicStatus(p.Status), AmountRequestedKES: p.AmountRequestedKes, AmountConfirmedKES: p.AmountConfirmedKes, CreatedAt: p.CreatedAt})
+	}
+	return out, nil
+}
+
 // Push sends the STK prompt for a recorded top-up. It never retries: a push whose outcome is unknown (a timeout,
 // a 5xx) may still have reached the customer, and a second prompt could take a second payment we would not know
 // about. Such a payment fails; any callback it later produces is kept as an orphan for reconciliation.

@@ -1,7 +1,8 @@
 # Phase 2 — Payments: checkpoint
 
-Status: IN PROGRESS (started 2026-10-22 on the owner's go-ahead). Slices 1 (#26), 2 (#27) and 4 (#13) merged;
-slice 3 (C2B) built against the mock, live sandbox run pending the initiator credentials.
+Status: IN PROGRESS (started 2026-10-22 on the owner's go-ahead). Slices 1 (#26), 2 (#27), 4 (#13) and 3 (#18, #19)
+merged and live; slice 5 (realtime, ADR 0010) built. Before the checkpoint closes: the paybill sandbox run (Daraja has
+not called back yet) and a first sandbox top-up from the owner's re-created test account.
 
 ## Plan (written before coding)
 
@@ -145,3 +146,21 @@ Decisions in ADR 0008; operator guide in `docs/runbooks/payments-operations.md` 
   masked payer, failure, reversed), silence → re-ask → unverified, outage retried, other shortcode, unknown result,
   validation codes (and no writes), suspense credit/refund and their refusals, reconciliation of suspense.
 - Pending: a live sandbox run (needs the owner's initiator name and security credential), statement matching.
+
+### Slice 5 (realtime confirmation)
+Decisions in ADR 0010.
+
+- Migration `00018`: trigger `payments_notify` announces every insert and every change of status or confirmed amount on
+  `payments.payments` on the `payment_events` channel (`<user>:<payment>`, sent at commit).
+- `payments.Live`: one listening connection per instance (reconnects with backoff), per-player fan-out, resync to every
+  subscriber after a reconnection, slow subscribers closed instead of blocking, caps (3 per player, 2000 per instance),
+  closed at server shutdown (`RegisterOnShutdown`). `payments.Recent`: the stream's snapshot.
+- API: `GET /v1/payments/events` (server-sent events: snapshot, `ready`, `payment` per visible change, heartbeat that
+  re-checks the session, `expired`); OpenAPI updated. Internal steps the player cannot see (`stk_sent`,
+  `callback_received`) send nothing.
+- Tests: Live unit tests (own player only, slow subscriber closed, caps, close); integration (listener connection
+  killed → resync → events flow again); API integration (snapshot includes a top-up started before the stream, another
+  player's changes never arrive, credit event with the confirmed amount, new payments announced, rolled-back changes
+  not announced, 401 without a token, `expired` after logout, 4th stream refused then freed, streams end and new ones
+  get 503 at shutdown).
+- Not done here: the compose e2e journey does not open a stream yet (it still polls).

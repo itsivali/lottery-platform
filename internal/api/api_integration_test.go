@@ -110,6 +110,7 @@ type env struct {
 	kyc  *kyc.Mock
 	vk   *testvalkey.Server
 	srv  *httptest.Server
+	live *payments.Live
 	enq  *kycQueue
 	pay  *payQueue
 	keys int
@@ -145,11 +146,15 @@ func setup(t *testing.T) *env {
 	})
 	rgs := rg.NewService(pool, clk, aw, rg.Config{CoolingOff: 24 * time.Hour})
 	ls := ledger.NewStore()
+	listenCfg := pool.Config().ConnConfig.Copy()
+	live := payments.NewLive(func(ctx context.Context) (*pgx.Conn, error) { return pgx.ConnectConfig(ctx, listenCfg) }, payments.LiveConfig{})
+	go live.Run(t.Context())
 	deps := api.Deps{
 		Identity:     ids,
 		KYC:          kyc.NewService(pool, clk, mock, kr, []byte("0123456789abcdef0123456789abcdef"), aw, enq),
 		RG:           rgs,
 		Payments:     payments.NewService(pool, clk, dc, pay, ids, rgs, wallet.NewService(ls), ls, aw, payments.Config{}).WithC2B(dc, payments.C2BConfig{ShortCode: "600982"}),
+		Live:         live,
 		CallbackPath: callbackPath,
 		Idem:         idempotency.NewStore(pool),
 		Limiter:      ratelimit.New(vk.Client(t)),
@@ -157,7 +162,8 @@ func setup(t *testing.T) *env {
 	srv := httptest.NewServer(httpx.NewRouterWith(pool, api.Mount(deps)))
 	enq.process = func(ctx context.Context, id string) error { return deps.KYC.Process(ctx, id) }
 	t.Cleanup(srv.Close)
-	return &env{pool: pool, clk: clk, kyc: mock, vk: vk, srv: srv, enq: enq, pay: pay}
+	t.Cleanup(live.Close) // before srv.Close (cleanups run last-in first-out), so open streams end
+	return &env{pool: pool, clk: clk, kyc: mock, vk: vk, srv: srv, live: live, enq: enq, pay: pay}
 }
 
 type resp struct {

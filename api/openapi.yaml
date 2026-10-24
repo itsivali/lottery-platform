@@ -288,7 +288,7 @@ paths:
       description: |
         Sends an M-Pesa prompt to the number on the account (never one supplied by the client). Needs a verified
         national ID; the first approved prompt also proves the phone number. The wallet is credited with the amount
-        actually paid, net of deposit excise, once Daraja's status query confirms it. Poll `GET /v1/payments/{id}`.
+        actually paid, net of deposit excise, once Daraja's status query confirms it. Watch `GET /v1/payments/events` (or poll `GET /v1/payments/{id}`).
       parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
       requestBody:
         required: true
@@ -308,6 +308,27 @@ paths:
           content:
             application/problem+json:
               schema: { $ref: "#/components/schemas/Problem" }
+        "429": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+  /v1/payments/events:
+    get:
+      operationId: paymentEvents
+      tags: [payments]
+      summary: Live stream of the signed-in player's payment changes (server-sent events)
+      description: |
+        A `text/event-stream`. It opens with a `payment` event for every payment still being settled or changed in
+        the last 15 minutes (oldest first), then a `ready` event, then one `payment` event per change as it commits
+        (STK top-ups and paybill credits alike). Each `payment` event's data is a `TopUp`; a client keeps the latest
+        per `id` (the same state may be sent again after a reconnection). A comment line is sent every 25 seconds.
+        The stream ends with an `expired` event once the access token expires or the session is revoked; reconnect
+        with a fresh token. A player may hold 3 streams open.
+      responses:
+        "200":
+          description: The event stream
+          content:
+            text/event-stream:
+              schema: { type: string }
+        "401": { $ref: "#/components/responses/Problem" }
         "429": { $ref: "#/components/responses/Problem" }
         "503": { $ref: "#/components/responses/Problem" }
   /v1/payments/{id}:

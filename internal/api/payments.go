@@ -51,7 +51,7 @@ func (h *handlers) startTopUp(w http.ResponseWriter, r *http.Request) {
 	var re *rg.RestrictedError
 	switch {
 	case err == nil:
-		// the prompt is sent in the background; the app polls GET /v1/payments/{id}
+		// the prompt is sent in the background; the app watches GET /v1/payments/events (or polls GET /v1/payments/{id})
 		httpx.WriteJSON(w, http.StatusAccepted, toTopUpJSON(t))
 	case errors.Is(err, payments.ErrInvalidAmount):
 		httpx.WriteProblem(w, http.StatusBadRequest, "invalid-amount", "Invalid amount",

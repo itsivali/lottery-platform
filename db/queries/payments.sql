@@ -253,3 +253,11 @@ SELECT EXISTS (SELECT 1 FROM payments.payments WHERE mpesa_receipt = $1);
 
 -- name: ConflictsAfterCredit :many
 SELECT trans_id FROM payments.c2b_confirmations WHERE conflicting AND status = 'credited' ORDER BY created_at;
+
+-- What a player's live stream starts from: payments still being settled, and those that changed recently.
+-- name: RecentPayments :many
+SELECT id, status, amount_requested_kes, amount_confirmed_kes, created_at
+FROM payments.payments
+WHERE user_id = sqlc.arg(user_id)
+  AND (updated_at >= sqlc.arg(since) OR status IN ('initiated','stk_sent','callback_received','verified'))
+ORDER BY created_at DESC LIMIT 20;

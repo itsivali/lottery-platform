@@ -79,6 +79,7 @@ func run(log *slog.Logger) error {
 		Handler:           tel.Middleware(handler),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
+	srv.RegisterOnShutdown(application.StopStreams)
 	errc := make(chan error, 1)
 	go func() { errc <- srv.ListenAndServe() }()
 	log.Info("api listening", "addr", cfg.HTTPAddr)
