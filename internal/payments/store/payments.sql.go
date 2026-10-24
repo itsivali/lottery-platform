@@ -887,6 +887,54 @@ func (q *Queries) RecentOrphanCallbacks(ctx context.Context, receivedAt time.Tim
 	return items, nil
 }
 
+const recentPayments = `-- name: RecentPayments :many
+SELECT id, status, amount_requested_kes, amount_confirmed_kes, created_at
+FROM payments.payments
+WHERE user_id = $1
+  AND (updated_at >= $2 OR status IN ('initiated','stk_sent','callback_received','verified'))
+ORDER BY created_at DESC LIMIT 20
+`
+
+type RecentPaymentsParams struct {
+	UserID string
+	Since  time.Time
+}
+
+type RecentPaymentsRow struct {
+	ID                 string
+	Status             string
+	AmountRequestedKes int64
+	AmountConfirmedKes *int64
+	CreatedAt          time.Time
+}
+
+// What a player's live stream starts from: payments still being settled, and those that changed recently.
+func (q *Queries) RecentPayments(ctx context.Context, arg RecentPaymentsParams) ([]RecentPaymentsRow, error) {
+	rows, err := q.db.Query(ctx, recentPayments, arg.UserID, arg.Since)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []RecentPaymentsRow
+	for rows.Next() {
+		var i RecentPaymentsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Status,
+			&i.AmountRequestedKes,
+			&i.AmountConfirmedKes,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const recheckC2B = `-- name: RecheckC2B :execrows
 UPDATE payments.c2b_confirmations
    SET status = 'received', status_result = NULL, originator_conversation_id = NULL, outcome_reason = NULL,

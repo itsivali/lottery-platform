@@ -27,6 +27,8 @@ type Deps struct {
 	RG       *rg.Service
 	// Payments is nil when Daraja is not configured: the routes then answer 503.
 	Payments *payments.Service
+	// Live streams payment changes to players; nil disables GET /v1/payments/events (503).
+	Live *payments.Live
 	// CallbackPath is the secret segment of the STK callback URL and of the paybill hook URLs.
 	CallbackPath string
 	Idem         *idempotency.Store
@@ -80,6 +82,7 @@ func Mount(d Deps) func(chi.Router) {
 				r.Post("/rg/timeout", h.rgTimeout)
 				r.Post("/rg/self-exclusion", h.rgSelfExclude)
 				r.Post("/payments/topups", h.startTopUp)
+				r.Get("/payments/events", h.paymentEvents)
 				r.Get("/payments/{id}", h.getPayment)
 			})
 		})

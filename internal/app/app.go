@@ -51,6 +51,8 @@ type App struct {
 	valkey   valkey.Client
 	kyc      *kyc.Service
 	payments *payments.Service
+	live     *payments.Live
+	stopLive context.CancelFunc
 	workers  *river.Client[pgx.Tx]
 }
 
@@ -113,8 +115,15 @@ func New(ctx context.Context, cfg config.Config, pool *pgxpool.Pool) (*App, erro
 		a.payments.WithC2B(client, payments.C2BConfig{ShortCode: p.C2BShortCode})
 	}
 
+	// One connection per instance listens for payment changes and fans them out to the players' streams.
+	listenCfg := pool.Config().ConnConfig.Copy()
+	a.live = payments.NewLive(func(ctx context.Context) (*pgx.Conn, error) { return pgx.ConnectConfig(ctx, listenCfg) }, payments.LiveConfig{})
+	liveCtx, stopLive := context.WithCancel(context.WithoutCancel(ctx))
+	a.stopLive = stopLive
+	go a.live.Run(liveCtx)
+
 	a.Mount = api.Mount(api.Deps{
-		Identity: idSvc, KYC: a.kyc, RG: rgSvc, Payments: a.payments, CallbackPath: cfg.Payments.CallbackPath,
+		Identity: idSvc, KYC: a.kyc, RG: rgSvc, Payments: a.payments, Live: a.live, CallbackPath: cfg.Payments.CallbackPath,
 		Idem:               idempotency.NewStore(pool),
 		Limiter:            ratelimit.New(vk),
 		TrustedProxyHeader: c.TrustedProxyHeader, TrustedProxyHops: c.TrustedProxyHops,
@@ -162,8 +171,20 @@ func (a *App) StartWorkers(ctx context.Context) error {
 	return nil
 }
 
+// StopStreams ends every open payment stream and refuses new ones. The server calls it when shutdown begins, since
+// a stream would otherwise hold the shutdown until its client went away.
+func (a *App) StopStreams() {
+	if a.live != nil {
+		a.live.Close()
+	}
+}
+
 // Close stops the workers and releases clients.
 func (a *App) Close(ctx context.Context) {
+	a.StopStreams()
+	if a.stopLive != nil {
+		a.stopLive()
+	}
 	if a.workers != nil {
 		_ = a.workers.Stop(ctx)
 	}

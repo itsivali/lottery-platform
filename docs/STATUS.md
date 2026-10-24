@@ -6,7 +6,8 @@ Read this first at the start of every session.
   (Daraja client + mock), 2 (STK top-up, ADR 0006) and 4 (reversals, player debt, internal reconciliation, ADR 0007)
   are merged and live. **Slice 3 (C2B paybill, ADR 0008) is merged and live (2026-10-24, #18, #19)**; its sandbox
   end-to-end run is blocked on Daraja: the sandbox accepts registrations, simulations and status requests but has not
-  called back yet (below). Next: slice 5 (realtime).
+  called back yet (below). **Slice 5 (realtime: `GET /v1/payments/events`, server-sent events fed by Postgres
+  notifications, ADR 0010) is built** (branch `feat/payments-realtime`).
 - **Repo state:** the GitHub repository was **deleted and recreated on 2026-10-22** (to drop co-author attribution that
   GitHub kept in old PR refs and caches) and `main` was pushed from the local clone. PR numbers below #8 in these docs
   refer to the deleted repository. Commits and PRs carry only the owner's name.
@@ -74,11 +75,10 @@ Read this first at the start of every session.
 
 ## Next steps
 
-1. **Recreate `lottery-api`** from the Blueprint (the owner deleted the service on 2026-10-24 to fix auto-deploy; the
-   database and Key Value survived). Then set the Daraja and paybill values again, update the service id and URL in
-   `db-rotate.yml`, `deploy-prod.yml` and the `RENDER_API_SERVICE_IDS` secret, and register the paybill URLs again.
-   The generated keys are new, so the test account (0796992457) signs up again and goes through manual KYC review.
-2. Phase 2 slice 5: realtime confirmation of top-ups.
+1. **Test account re-created (2026-10-24):** 0796992457 signed up again on the recreated service and its KYC was
+   approved by hand (owner-attested); its password is in `~/.config/lottery-platform/test-account.env`. Next: a first
+   sandbox top-up (owner approves the prompt), which also proves the phone.
+2. Merge and deploy slice 5; then close the phase 2 checkpoint (paybill sandbox run still waiting on Daraja).
 3. Owner: run trusted-proxy probe 2 from a second network; define the manual KYC review procedure and service level.
 4. Later: password reset (STK proof + ID match), passkeys/TOTP, real Play Integrity / App Attest verifiers.
 
