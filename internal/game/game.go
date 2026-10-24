@@ -31,7 +31,6 @@ var (
 	ErrInDebt            = errors.New("game: the player owes money from a reversed deposit")
 	ErrInsufficientFunds = errors.New("game: balance below the price of a play")
 	ErrIdempotencyKey    = errors.New("game: an idempotency key is required")
-	ErrNotFound          = errors.New("game: not found")
 	ErrNoOdds            = errors.New("game: no odds version in force")
 )
 
@@ -261,6 +260,7 @@ func (s *Service) lockChain(ctx context.Context, q *store.Queries, userID string
 	return activeChain{ID: c.ID, ClientSeed: c.ClientSeed, NextNonce: c.NextNonce}, seed, nil
 }
 
+// newChain starts a chain; callers have validated a client seed they pass ("" picks a random one).
 func (s *Service) newChain(ctx context.Context, q *store.Queries, userID, clientSeed string, now time.Time) (string, error) {
 	if clientSeed == "" {
 		cs, err := fair.NewClientSeed()
@@ -268,9 +268,6 @@ func (s *Service) newChain(ctx context.Context, q *store.Queries, userID, client
 			return "", err
 		}
 		clientSeed = cs
-	}
-	if !fair.ValidClientSeed(clientSeed) {
-		return "", fair.ErrBadClientSeed
 	}
 	seed, err := fair.NewServerSeed()
 	if err != nil {
@@ -285,9 +282,6 @@ func (s *Service) newChain(ctx context.Context, q *store.Queries, userID, client
 
 func (s *Service) load(ctx context.Context, q *store.Queries, ticketID string) (Play, error) {
 	r, err := q.GetPlay(ctx, ticketID)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return Play{}, ErrNotFound
-	}
 	if err != nil {
 		return Play{}, err
 	}

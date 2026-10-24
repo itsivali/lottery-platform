@@ -383,3 +383,186 @@ func TestFairness_ConcurrentFirstRequestsCreateOneChain(t *testing.T) {
 		}
 	}
 }
+
+func TestPlay_ConcurrentRequestsWithOneKeyMakeOnePlay(t *testing.T) {
+	e := setup(t)
+	u := e.player(t, 1000)
+	var wg sync.WaitGroup
+	ids := make([]string, 6)
+	for i := range ids {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			res, err := e.svc.Play(context.Background(), u, "one-key")
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			ids[i] = res.Play.TicketID
+		}()
+	}
+	wg.Wait()
+	for _, id := range ids {
+		if id != ids[0] {
+			t.Fatalf("different tickets for one key: %v", ids)
+		}
+	}
+	if e.balance(t, u) != 850 {
+		t.Fatalf("charged more than once: balance %d", e.balance(t, u))
+	}
+}
+
+func TestPlay_WithoutAnOddsVersionInForceNothingIsSold(t *testing.T) {
+	e := setup(t)
+	u := e.player(t, 1000)
+	e.clk.Set(time.Date(1999, 12, 31, 12, 0, 0, 0, time.UTC)) // before the first odds version
+	if _, err := e.svc.Play(context.Background(), u, "k"); !errors.Is(err, game.ErrNoOdds) {
+		t.Fatalf("play: %v", err)
+	}
+	if _, err := e.svc.Today(context.Background(), u); !errors.Is(err, game.ErrNoOdds) {
+		t.Fatalf("today: %v", err)
+	}
+}
+
+func TestSeedChain_TamperingIsRefused(t *testing.T) {
+	e := setup(t)
+	ctx := context.Background()
+	u := e.player(t, 1000)
+	if _, err := e.svc.Fairness(ctx, u); err != nil {
+		t.Fatal(err)
+	}
+	// a commitment changed after the fact: the seed no longer matches what was shown, so it is not revealed as if it did
+	if _, err := e.pool.Exec(ctx, `UPDATE game.seed_chains SET commitment = repeat('0', 64) WHERE user_id = $1`, u); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.svc.Rotate(ctx, u, ""); err == nil {
+		t.Fatal("rotated a chain whose seed does not match its commitment")
+	}
+	// an encrypted seed that does not decrypt (wrong key or edited): no spin and no rotation
+	if _, err := e.pool.Exec(ctx, `UPDATE game.seed_chains SET seed_enc = '\x0001' WHERE user_id = $1`, u); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.svc.Play(ctx, u, "k"); err == nil {
+		t.Fatal("played with a seed that does not decrypt")
+	}
+	if _, err := e.svc.Rotate(ctx, u, ""); err == nil {
+		t.Fatal("rotated a seed that does not decrypt")
+	}
+	if e.balance(t, u) != 950 {
+		t.Fatal("charged for a failed play")
+	}
+}
+
+func TestService_DatabaseFailuresSurfaceAsErrors(t *testing.T) {
+	e := setup(t)
+	u := e.player(t, 1000)
+	if _, err := e.svc.Play(context.Background(), u, "k"); err != nil { // a chain and a day exist
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := e.svc.Play(ctx, u, "k2"); err == nil {
+		t.Error("play on a cancelled context")
+	}
+	if _, err := e.svc.Today(ctx, u); err == nil {
+		t.Error("today on a cancelled context")
+	}
+	if _, err := e.svc.Fairness(ctx, u); err == nil {
+		t.Error("fairness on a cancelled context")
+	}
+	if _, err := e.svc.Rotate(ctx, u, ""); err == nil {
+		t.Error("rotate on a cancelled context")
+	}
+}
+
+func TestPlay_AReusedNonceIsRefusedAndNothingIsCharged(t *testing.T) {
+	e := setup(t)
+	u := e.player(t, 1000)
+	if _, err := e.svc.Play(context.Background(), u, "a"); err != nil {
+		t.Fatal(err)
+	}
+	// wind the chain back: the next spin would reuse nonce 0, which the database refuses (one spin per chain and nonce)
+	if _, err := e.pool.Exec(context.Background(), `UPDATE game.seed_chains SET next_nonce = 0 WHERE user_id = $1`, u); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.svc.Play(context.Background(), u, "b"); err == nil {
+		t.Fatal("a nonce was used twice")
+	}
+	if e.balance(t, u) != 850 {
+		t.Fatalf("balance %d after the refused play", e.balance(t, u))
+	}
+}
+
+type brokenClock struct{}
+
+func (brokenClock) Now(context.Context, clock.Querier) (time.Time, error) {
+	return time.Time{}, errors.New("clock unavailable")
+}
+
+// brokenWallet fails the call named in fail and delegates the rest.
+type brokenWallet struct {
+	*wallet.Service
+	fail string
+}
+
+var errWallet = errors.New("wallet unavailable")
+
+func (w brokenWallet) Debt(ctx context.Context, tx pgx.Tx, u string) (int64, error) {
+	if w.fail == "debt" {
+		return 0, errWallet
+	}
+	return w.Service.Debt(ctx, tx, u)
+}
+
+func (w brokenWallet) Apply(ctx context.Context, tx pgx.Tx, p ledger.Posting) (int64, error) {
+	if w.fail == "apply" {
+		return 0, errWallet
+	}
+	return w.Service.Apply(ctx, tx, p)
+}
+
+func (w brokenWallet) Balance(ctx context.Context, tx pgx.Tx, u string) (int64, error) {
+	if w.fail == "balance" {
+		return 0, errWallet
+	}
+	return w.Service.Balance(ctx, tx, u)
+}
+
+func TestService_DependencyFailuresAbortThePlay(t *testing.T) {
+	e := setup(t)
+	ctx := context.Background()
+	u := e.player(t, 1000)
+	kr, _ := crypto.NewKeyring(1, map[byte][]byte{1: make([]byte, 32)})
+	ids := identity.NewService(e.pool, e.clk, nil, audit.NewWriter(), identity.Config{AuthKey: []byte("0123456789abcdef0123456789abcdef")})
+
+	noClock := game.NewService(e.pool, brokenClock{}, ids, e.rg, e.wallet, kr, wallet.ErrInsufficientFunds)
+	if _, err := noClock.Play(ctx, u, "c"); err == nil {
+		t.Error("play without a clock")
+	}
+	if _, err := noClock.Today(ctx, u); err == nil {
+		t.Error("today without a clock")
+	}
+	if _, err := noClock.Fairness(ctx, u); err == nil {
+		t.Error("fairness without a clock")
+	}
+	if _, err := noClock.Rotate(ctx, u, ""); err == nil {
+		t.Error("rotate without a clock")
+	}
+	for _, fail := range []string{"debt", "apply"} {
+		svc := game.NewService(e.pool, e.clk, ids, e.rg, brokenWallet{e.wallet, fail}, kr, wallet.ErrInsufficientFunds)
+		if _, err := svc.Play(ctx, u, "w-"+fail); !errors.Is(err, errWallet) {
+			t.Errorf("%s failing: %v", fail, err)
+		}
+	}
+	if e.balance(t, u) != 950 {
+		t.Fatal("a failed play charged the player")
+	}
+	ok := game.NewService(e.pool, e.clk, ids, e.rg, e.wallet, kr, wallet.ErrInsufficientFunds)
+	if _, err := ok.Play(ctx, u, "w-replay"); err != nil {
+		t.Fatal(err)
+	}
+	broken := game.NewService(e.pool, e.clk, ids, e.rg, brokenWallet{e.wallet, "balance"}, kr, wallet.ErrInsufficientFunds)
+	if _, err := broken.Play(ctx, u, "w-replay"); !errors.Is(err, errWallet) {
+		t.Errorf("replay with the balance failing: %v", err)
+	}
+}
