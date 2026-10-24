@@ -1,6 +1,6 @@
 # Phase 3 — Game and tickets: checkpoint
 
-Status: IN PROGRESS (started 2026-10-24 on the owner's go-ahead).
+Status: COMPLETE (2026-10-24).
 
 ## Owner decisions (2026-10-24)
 - **Price: KES 100 per play.** Versioned with the odds (`game.odds_config.price_kes`), so a later price applies from a
@@ -72,3 +72,38 @@ mutation testing of `game`, checkpoint report.
   midnight; chances follow the tiers and double on a lucky day; refusals (low balance, unproved phone, time-out, debt)
   charge and count nothing; concurrent first fairness requests create one chain. API: the journey to the daily limit,
   error mapping, and the new routes in the auth and idempotency sweeps.
+
+### Slice 3 (reconciliation, simulation, checkpoint)
+- Migration `00020`: `game.reconciliation_runs` (append-only).
+- `game.Reconcile` (daily River job `game.reconcile`, on start too; `lotteryctl game reconcile`): ticket ⇔ stake journal
+  ⇔ price, `STAKES_REVENUE` = paid tickets, ticket ⇔ spin, player day ⇔ tickets and luck, nonces without gaps,
+  published seeds ⇔ commitments, and every spin of chains revealed in the last 48 hours recomputed from its seed. One
+  test per kind of tampering. Runbook: `docs/runbooks/game-operations.md`.
+- `game.Simulate` / `lotteryctl game simulate` (no database): lucky-day rate and draw chances per number of daily
+  plays from real fair spins, against the theory; in the nightly on the odds in force.
+- Mutation testing of `game` in the nightly, with its integration tests (like `wallet`).
+
+**Simulation on the placeholder odds** (12 slots, 1 lucky, KES 100, tiers 1→1, 2→2, 3→3, 4→5; 50,000 days each):
+
+| Plays a day | Stake | Lucky days (theory) | Mean chances (theory) | KES per chance |
+|---|---|---|---|---|
+| 1 | 100 | 8.1% (8.3%) | 1.08 (1.08) | 92 |
+| 2 | 200 | 16.0% (16.0%) | 2.32 (2.32) | 86 |
+| 3 | 300 | 23.0% (23.0%) | 3.69 (3.69) | 81 |
+| 4 | 400 | 29.3% (29.4%) | 6.47 (6.47) | 62 |
+
+**For the owner:** with these placeholder tiers a chance costs a third less on the 4th play of the day than on the
+1st, a reward for playing the maximum. A regulator (and our own responsible-gaming principles) may see that as an
+incentive to play more; flat tiers (1→1 … 4→4) would make every play worth the same. Decide with the real values.
+
+**Mutation testing of `game`** (gremlins, with the integration tests, 2026-10-24): efficacy 92.0% (127 killed, 11
+survived, 4 timed out), above the 75% gate. A first run found two survivors (an equivalent mutant in `Today`, and a
+duplicate-key retry the race test never reached) and a gremlins crash on a file without coverage; all three were fixed
+by simplifying the code (the first chain is now created with `ON CONFLICT DO NOTHING`).
+
+## Checkpoint (2026-10-24)
+
+Phase 3 is complete: plays at KES 100, 4 a Nairobi day, provably fair spins with an independent verifier, chances by
+tier doubled on a lucky day, daily reconciliation, odds simulation. The owner's test account played the first live
+round (slot 6 of 12, verified after rotation). Open for the owner: real odds and chance tiers (the placeholder tiers
+reward the 4th play; see the simulation note above).

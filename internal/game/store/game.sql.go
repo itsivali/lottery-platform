@@ -19,6 +19,36 @@ func (q *Queries) AdvanceNonce(ctx context.Context, id string) error {
 	return err
 }
 
+const dayTallyMismatch = `-- name: DayTallyMismatch :many
+SELECT (d.user_id::text || ' ' || d.play_date::text)::text AS day FROM tickets.player_days d
+LEFT JOIN (SELECT t.user_id, t.play_date, count(*) AS n, bool_or(s.lucky) AS lucky
+           FROM tickets.tickets t JOIN game.spins s ON s.ticket_id = t.id GROUP BY t.user_id, t.play_date) x
+  ON x.user_id = d.user_id AND x.play_date = d.play_date
+WHERE d.paid_plays <> coalesce(x.n, 0) OR d.lucky <> coalesce(x.lucky, false)
+ORDER BY 1
+`
+
+// a player's day counts exactly the tickets sold that day, and is lucky exactly when one of their spins was
+func (q *Queries) DayTallyMismatch(ctx context.Context) ([]string, error) {
+	rows, err := q.db.Query(ctx, dayTallyMismatch)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []string
+	for rows.Next() {
+		var day string
+		if err := rows.Scan(&day); err != nil {
+			return nil, err
+		}
+		items = append(items, day)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const ensurePlayerDay = `-- name: EnsurePlayerDay :exec
 INSERT INTO tickets.player_days (user_id, play_date, updated_at) VALUES ($1, $2, $3)
 ON CONFLICT (user_id, play_date) DO NOTHING
@@ -132,9 +162,9 @@ func (q *Queries) GetPlayerDay(ctx context.Context, arg GetPlayerDayParams) (Get
 	return i, err
 }
 
-const insertChain = `-- name: InsertChain :one
+const insertChain = `-- name: InsertChain :exec
 INSERT INTO game.seed_chains (user_id, seed_enc, commitment, client_seed, created_at)
-VALUES ($1, $2, $3, $4, $5) RETURNING id
+VALUES ($1, $2, $3, $4, $5) ON CONFLICT (user_id) WHERE status = 'active' DO NOTHING
 `
 
 type InsertChainParams struct {
@@ -145,17 +175,31 @@ type InsertChainParams struct {
 	CreatedAt  time.Time
 }
 
-func (q *Queries) InsertChain(ctx context.Context, arg InsertChainParams) (string, error) {
-	row := q.db.QueryRow(ctx, insertChain,
+// does nothing when the player already has an active chain (a concurrent request created it first)
+func (q *Queries) InsertChain(ctx context.Context, arg InsertChainParams) error {
+	_, err := q.db.Exec(ctx, insertChain,
 		arg.UserID,
 		arg.SeedEnc,
 		arg.Commitment,
 		arg.ClientSeed,
 		arg.CreatedAt,
 	)
-	var id string
-	err := row.Scan(&id)
-	return id, err
+	return err
+}
+
+const insertReconciliationRun = `-- name: InsertReconciliationRun :exec
+INSERT INTO game.reconciliation_runs (ran_at, ok, report) VALUES ($1, $2, $3)
+`
+
+type InsertReconciliationRunParams struct {
+	RanAt  time.Time
+	Ok     bool
+	Report []byte
+}
+
+func (q *Queries) InsertReconciliationRun(ctx context.Context, arg InsertReconciliationRunParams) error {
+	_, err := q.db.Exec(ctx, insertReconciliationRun, arg.RanAt, arg.Ok, arg.Report)
+	return err
 }
 
 const insertSpin = `-- name: InsertSpin :exec
@@ -265,6 +309,34 @@ func (q *Queries) LockPlayerDay(ctx context.Context, arg LockPlayerDayParams) (L
 	return i, err
 }
 
+const nonceGaps = `-- name: NonceGaps :many
+SELECT c.id FROM game.seed_chains c
+LEFT JOIN (SELECT chain_id, count(*) AS n, max(nonce) AS hi FROM game.spins GROUP BY chain_id) s ON s.chain_id = c.id
+WHERE coalesce(s.n, 0) <> c.next_nonce OR (s.n > 0 AND s.hi <> c.next_nonce - 1)
+ORDER BY c.id
+`
+
+// a chain's spins use nonces 0 .. next_nonce-1, each once
+func (q *Queries) NonceGaps(ctx context.Context) ([]string, error) {
+	rows, err := q.db.Query(ctx, nonceGaps)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const oddsFor = `-- name: OddsFor :one
 SELECT id, slot_count, lucky_slots, price_kes FROM game.odds_config
 WHERE effective_from <= $1::date ORDER BY effective_from DESC LIMIT 1
@@ -287,6 +359,22 @@ func (q *Queries) OddsFor(ctx context.Context, playDate time.Time) (OddsForRow, 
 		&i.LuckySlots,
 		&i.PriceKes,
 	)
+	return i, err
+}
+
+const paidTicketsTotal = `-- name: PaidTicketsTotal :one
+SELECT count(*)::bigint AS tickets, coalesce(sum(price_kes), 0)::bigint AS kes FROM tickets.tickets WHERE status = 'paid'
+`
+
+type PaidTicketsTotalRow struct {
+	Tickets int64
+	Kes     int64
+}
+
+func (q *Queries) PaidTicketsTotal(ctx context.Context) (PaidTicketsTotalRow, error) {
+	row := q.db.QueryRow(ctx, paidTicketsTotal)
+	var i PaidTicketsTotalRow
+	err := row.Scan(&i.Tickets, &i.Kes)
 	return i, err
 }
 
@@ -340,6 +428,82 @@ func (q *Queries) RecordPlay(ctx context.Context, arg RecordPlayParams) error {
 		arg.PlayDate,
 	)
 	return err
+}
+
+const revealedSeedMismatch = `-- name: RevealedSeedMismatch :many
+SELECT id FROM game.seed_chains
+WHERE status = 'rotated' AND encode(sha256(decode(revealed_seed, 'hex')), 'hex') <> commitment
+ORDER BY id
+`
+
+func (q *Queries) RevealedSeedMismatch(ctx context.Context) ([]string, error) {
+	rows, err := q.db.Query(ctx, revealedSeedMismatch)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const revealedSpins = `-- name: RevealedSpins :many
+SELECT s.ticket_id, s.client_seed, s.nonce, s.slot, s.lucky, c.revealed_seed, o.slot_count, o.lucky_slots
+FROM game.spins s
+JOIN game.seed_chains c ON c.id = s.chain_id
+JOIN game.odds_config o ON o.id = s.odds_config_id
+WHERE c.status = 'rotated' AND c.revealed_at >= $1::timestamptz
+ORDER BY s.ticket_id
+`
+
+type RevealedSpinsRow struct {
+	TicketID     string
+	ClientSeed   string
+	Nonce        int64
+	Slot         int16
+	Lucky        bool
+	RevealedSeed *string
+	SlotCount    int16
+	LuckySlots   int16
+}
+
+// spins of chains revealed since a time, with what is needed to recompute them
+func (q *Queries) RevealedSpins(ctx context.Context, since time.Time) ([]RevealedSpinsRow, error) {
+	rows, err := q.db.Query(ctx, revealedSpins, since)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []RevealedSpinsRow
+	for rows.Next() {
+		var i RevealedSpinsRow
+		if err := rows.Scan(
+			&i.TicketID,
+			&i.ClientSeed,
+			&i.Nonce,
+			&i.Slot,
+			&i.Lucky,
+			&i.RevealedSeed,
+			&i.SlotCount,
+			&i.LuckySlots,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const rotateChain = `-- name: RotateChain :exec
@@ -401,6 +565,76 @@ func (q *Queries) RotatedChains(ctx context.Context, userID string) ([]RotatedCh
 	return items, nil
 }
 
+const stakeAmountMismatch = `-- name: StakeAmountMismatch :many
+SELECT t.id FROM tickets.tickets t
+JOIN ledger.ledger_journals j ON j.kind = 'stake' AND j.reference_type = 'ticket' AND j.reference_id = t.id
+JOIN ledger.ledger_entries e ON e.journal_id = j.id AND e.direction = 'C'
+JOIN ledger.ledger_accounts a ON a.id = e.account_id AND a.code = 'STAKES_REVENUE'
+GROUP BY t.id, t.price_kes HAVING sum(e.amount_kes) <> t.price_kes
+ORDER BY t.id
+`
+
+// the stake credited to STAKES_REVENUE is the ticket's price
+func (q *Queries) StakeAmountMismatch(ctx context.Context) ([]string, error) {
+	rows, err := q.db.Query(ctx, stakeAmountMismatch)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const stakesRevenue = `-- name: StakesRevenue :one
+SELECT coalesce(sum(CASE e.direction WHEN 'C' THEN e.amount_kes ELSE -e.amount_kes END), 0)::bigint
+FROM ledger.ledger_entries e JOIN ledger.ledger_accounts a ON a.id = e.account_id WHERE a.code = 'STAKES_REVENUE'
+`
+
+// credit-normal balance of STAKES_REVENUE
+func (q *Queries) StakesRevenue(ctx context.Context) (int64, error) {
+	row := q.db.QueryRow(ctx, stakesRevenue)
+	var column_1 int64
+	err := row.Scan(&column_1)
+	return column_1, err
+}
+
+const stakesWithoutTicket = `-- name: StakesWithoutTicket :many
+SELECT j.reference_id::text FROM ledger.ledger_journals j
+WHERE j.kind = 'stake' AND j.reference_type = 'ticket'
+  AND NOT EXISTS (SELECT 1 FROM tickets.tickets t WHERE t.id = j.reference_id)
+ORDER BY 1
+`
+
+func (q *Queries) StakesWithoutTicket(ctx context.Context) ([]string, error) {
+	rows, err := q.db.Query(ctx, stakesWithoutTicket)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []string
+	for rows.Next() {
+		var j_reference_id string
+		if err := rows.Scan(&j_reference_id); err != nil {
+			return nil, err
+		}
+		items = append(items, j_reference_id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const ticketByKey = `-- name: TicketByKey :one
 SELECT id FROM tickets.tickets WHERE user_id = $1 AND idempotency_key = $2
 `
@@ -415,6 +649,58 @@ func (q *Queries) TicketByKey(ctx context.Context, arg TicketByKeyParams) (strin
 	var id string
 	err := row.Scan(&id)
 	return id, err
+}
+
+const ticketsWithoutSpin = `-- name: TicketsWithoutSpin :many
+SELECT t.id FROM tickets.tickets t WHERE NOT EXISTS (SELECT 1 FROM game.spins s WHERE s.ticket_id = t.id) ORDER BY t.id
+`
+
+func (q *Queries) TicketsWithoutSpin(ctx context.Context) ([]string, error) {
+	rows, err := q.db.Query(ctx, ticketsWithoutSpin)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const ticketsWithoutStake = `-- name: TicketsWithoutStake :many
+
+SELECT t.id FROM tickets.tickets t
+WHERE NOT EXISTS (SELECT 1 FROM ledger.ledger_journals j WHERE j.kind = 'stake' AND j.reference_type = 'ticket' AND j.reference_id = t.id)
+ORDER BY t.id
+`
+
+// Reconciliation. Each "mismatch" query returns the ids that break an invariant; each must return nothing.
+func (q *Queries) TicketsWithoutStake(ctx context.Context) ([]string, error) {
+	rows, err := q.db.Query(ctx, ticketsWithoutStake)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const tiersFor = `-- name: TiersFor :many

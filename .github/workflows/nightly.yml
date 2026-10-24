@@ -19,14 +19,14 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with: { go-version-file: go.mod }
       - name: Mutation testing (gremlins) on money-path packages
-        # wallet is tested only against Postgres, so it is mutated with its integration tests (without them every
-        # mutant is "not covered" and the score is a meaningless 0%)
+        # wallet and game are tested only against Postgres, so they are mutated with their integration tests (without
+        # them every mutant is "not covered" and the score is a meaningless 0%)
         run: |
           go install github.com/go-gremlins/gremlins/cmd/gremlins@v0.6.0
           for p in wallet ledger tickets game draws payments payouts; do
             if ls internal/$p/*.go 2>/dev/null | grep -qv doc.go; then
               tags=""
-              [ "$p" = wallet ] && tags="--tags integration --workers 2 --timeout-coefficient 5"
+              case $p in wallet | game) tags="--tags integration --workers 2 --timeout-coefficient 5" ;; esac
               (cd internal/$p && gremlins unleash --threshold-efficacy 75 $tags)
             fi
           done
@@ -41,7 +41,8 @@ jobs:
       - name: 10-million-spin distribution test
         run: go test -tags integration,distribution -count=1 -timeout 30m -run 'Distribution10M' ./...
       - name: RTP simulation report
-        run: echo "lotteryctl simulate arrives in Phase 3"
+        # odds of a lucky day and the cost of a draw chance under the odds version in force, from real fair spins
+        run: go run ./cmd/lotteryctl game simulate -days 1000000 | tee "$RUNNER_TEMP/simulation.json"
       - name: Dependency audit
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
       - name: Open an issue on failure

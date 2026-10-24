@@ -31,3 +31,20 @@ func TestRun_PaymentsReconcilePrintsACleanReportOnAFreshDatabase(t *testing.T) {
 		t.Fatal("reversing an unknown receipt succeeded")
 	}
 }
+
+func TestRun_GameReconcilePrintsACleanReportOnAFreshDatabase(t *testing.T) {
+	t.Setenv("DATABASE_URL", testpg.Migrated(t))
+	for _, k := range []string{"AUTH_KEY", "TOKEN_SEED", "DATA_KEY", "DATA_KEYS", "IDENTITY_KEY", "VALKEY_ADDR", "DARAJA_CONSUMER_KEY"} {
+		t.Setenv(k, "")
+	}
+	var out bytes.Buffer
+	if err := run(context.Background(), command{name: "game reconcile"}, &out); err != nil {
+		t.Fatalf("reconcile: %v\n%s", err, out.String())
+	}
+	var r struct {
+		OK bool `json:"ok"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &r); err != nil || !r.OK {
+		t.Fatalf("report = %s (%v)", out.String(), err)
+	}
+}

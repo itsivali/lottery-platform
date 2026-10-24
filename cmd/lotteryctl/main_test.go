@@ -1,6 +1,9 @@
 package main
 
 import (
+	"bytes"
+	"context"
+	"encoding/json"
 	"reflect"
 	"testing"
 )
@@ -47,6 +50,13 @@ func TestParse(t *testing.T) {
 			command{name: "kyc approve", user: "u-1", reason: "ID checked", operator: "operator:willis"}, false},
 		{[]string{"kyc", "reject", "-user", "u-1", "-operator", "willis"}, command{}, true}, // no reason
 		{[]string{"kyc", "promote", "-user", "u-1"}, command{}, true},
+		{[]string{"game", "reconcile"}, command{name: "game reconcile"}, false},
+		{[]string{"game", "reconcile", "-days", "5"}, command{}, true},
+		{[]string{"game", "simulate"}, command{name: "game simulate"}, false},
+		{[]string{"game", "simulate", "-days", "500", "-slots", "10", "-lucky", "2", "-price", "50"},
+			command{name: "game simulate", days: 500, slots: 10, lucky: 2, price: 50}, false},
+		{[]string{"game", "simulate", "-days", "-1"}, command{}, true},
+		{[]string{"game", "simulate", "-operator", "w"}, command{}, true},
 		{[]string{"bogus"}, command{}, true},
 		{nil, command{}, true},
 	}
@@ -55,5 +65,24 @@ func TestParse(t *testing.T) {
 		if (err != nil) != tc.wantErr || (err == nil && !reflect.DeepEqual(got, tc.want)) {
 			t.Errorf("parse(%v) = %+v, %v; want %+v, err=%v", tc.args, got, err, tc.want, tc.wantErr)
 		}
+	}
+}
+
+func TestRun_GameSimulateNeedsNoDatabase(t *testing.T) {
+	t.Setenv("DATABASE_URL", "")
+	var out bytes.Buffer
+	if err := run(context.Background(), command{name: "game simulate", days: 2000}, &out); err != nil {
+		t.Fatal(err)
+	}
+	var rep struct {
+		Slots int   `json:"slots"`
+		Price int64 `json:"price_kes"`
+		Rows  []any `json:"by_plays_per_day"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &rep); err != nil || rep.Slots != 12 || rep.Price != 100 || len(rep.Rows) != 4 {
+		t.Fatalf("report %s (%v)", out.String(), err)
+	}
+	if err := run(context.Background(), command{name: "game simulate", slots: 3, lucky: 3}, &out); err == nil {
+		t.Fatal("simulated an impossible odds version")
 	}
 }

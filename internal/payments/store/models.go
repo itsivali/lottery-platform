@@ -108,6 +108,13 @@ type GameOddsConfig struct {
 	PriceKes      int64
 }
 
+type GameReconciliationRun struct {
+	ID     string
+	RanAt  time.Time
+	Ok     bool
+	Report []byte
+}
+
 type GameSeedChain struct {
 	ID           string
 	UserID       string

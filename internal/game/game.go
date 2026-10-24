@@ -245,7 +245,7 @@ type activeChain struct {
 func (s *Service) lockChain(ctx context.Context, q *store.Queries, userID string, now time.Time) (activeChain, []byte, error) {
 	c, err := q.LockActiveChain(ctx, userID)
 	if errors.Is(err, pgx.ErrNoRows) {
-		if _, err := s.newChain(ctx, q, userID, "", now); err != nil {
+		if err := s.newChain(ctx, q, userID, "", now); err != nil {
 			return activeChain{}, nil, err
 		}
 		c, err = q.LockActiveChain(ctx, userID)
@@ -260,22 +260,23 @@ func (s *Service) lockChain(ctx context.Context, q *store.Queries, userID string
 	return activeChain{ID: c.ID, ClientSeed: c.ClientSeed, NextNonce: c.NextNonce}, seed, nil
 }
 
-// newChain starts a chain; callers have validated a client seed they pass ("" picks a random one).
-func (s *Service) newChain(ctx context.Context, q *store.Queries, userID, clientSeed string, now time.Time) (string, error) {
+// newChain starts a chain unless the player already has an active one; callers have validated a client seed they
+// pass ("" picks a random one).
+func (s *Service) newChain(ctx context.Context, q *store.Queries, userID, clientSeed string, now time.Time) error {
 	if clientSeed == "" {
 		cs, err := fair.NewClientSeed()
 		if err != nil {
-			return "", err
+			return err
 		}
 		clientSeed = cs
 	}
 	seed, err := fair.NewServerSeed()
 	if err != nil {
-		return "", err
+		return err
 	}
 	enc, err := s.keys.Encrypt(seed, seedAAD(userID))
 	if err != nil {
-		return "", err
+		return err
 	}
 	return q.InsertChain(ctx, store.InsertChainParams{UserID: userID, SeedEnc: enc, Commitment: fair.Commitment(seed), ClientSeed: clientSeed, CreatedAt: now})
 }
@@ -312,19 +313,17 @@ func (s *Service) today(ctx context.Context, q *store.Queries, userID string, da
 		return Today{}, err
 	}
 	t.Plays, t.Lucky, t.PlaysLeft = int(pd.PaidPlays), pd.Lucky, DailyPlays-int(pd.PaidPlays)
-	if t.Plays > 0 {
-		tiers, err := q.TiersFor(ctx, day)
-		if err != nil {
-			return Today{}, err
+	tiers, err := q.TiersFor(ctx, day)
+	if err != nil {
+		return Today{}, err
+	}
+	for _, tr := range tiers { // no tier for 0 plays: no chances
+		if int(tr.Plays) == t.Plays {
+			t.Chances = int(tr.Chances)
 		}
-		for _, tr := range tiers {
-			if int(tr.Plays) == t.Plays {
-				t.Chances = int(tr.Chances)
-			}
-		}
-		if t.Lucky {
-			t.Chances *= 2
-		}
+	}
+	if t.Lucky {
+		t.Chances *= 2
 	}
 	ids, err := q.PlaysOn(ctx, store.PlaysOnParams{UserID: userID, PlayDate: day})
 	if err != nil {
@@ -368,7 +367,7 @@ func (s *Service) Fairness(ctx context.Context, userID string) (Fairness, error)
 			return err
 		}
 		if _, err := q.GetActiveChain(ctx, userID); errors.Is(err, pgx.ErrNoRows) {
-			if _, err := s.newChain(ctx, q, userID, "", now); err != nil {
+			if err := s.newChain(ctx, q, userID, "", now); err != nil {
 				return err
 			}
 		} else if err != nil {
@@ -377,10 +376,6 @@ func (s *Service) Fairness(ctx context.Context, userID string) (Fairness, error)
 		f, err = s.fairness(ctx, q, userID)
 		return err
 	})
-	var pe *pgconn.PgError
-	if errors.As(err, &pe) && pe.Code == "23505" { // two first requests raced to create the chain
-		return s.Fairness(ctx, userID)
-	}
 	return f, err
 }
 
@@ -434,7 +429,7 @@ func (s *Service) Rotate(ctx context.Context, userID, clientSeed string) (Fairne
 				return err
 			}
 		}
-		if _, err := s.newChain(ctx, q, userID, clientSeed, now); err != nil {
+		if err := s.newChain(ctx, q, userID, clientSeed, now); err != nil {
 			return err
 		}
 		f, err = s.fairness(ctx, q, userID)
