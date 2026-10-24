@@ -22,7 +22,7 @@ import (
 	"time"
 
 	bls12381 "github.com/drand/kyber-bls12381"
-	"github.com/drand/kyber/sign/bls" //nolint:staticcheck // deprecated for aggregating signatures under untrusted keys; drand verifies one signature under one pinned group key, which that attack does not reach
+	"github.com/drand/kyber/sign/bdn"
 )
 
 // Chain is what is pinned about a drand chain.
@@ -90,7 +90,8 @@ func (c Chain) Verify(b Beacon) error {
 	var r [8]byte
 	binary.BigEndian.PutUint64(r[:], b.Round)
 	msg := sha256.Sum256(r[:])
-	scheme := bls.NewSchemeOnG1(bls12381.NewBLS12381Suite())
+	// BDN's single-signature verification is plain BLS (BDN only changes how signatures are aggregated)
+	scheme := bdn.NewSchemeOnG1(bls12381.NewBLS12381Suite())
 	if err := scheme.Verify(pub, msg[:], sig); err != nil {
 		return ErrInvalid
 	}

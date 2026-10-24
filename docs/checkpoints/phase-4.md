@@ -61,5 +61,5 @@ a public draw verifier in `tools/verifier`, reconciliation of pools, monitoring 
   (api, api2, api3, Cloudflare), refusing before the round's time and refusing any beacon that does not verify.
 - Tests on three real recorded beacons; refused: another round's signature, a relabelled round, swapped randomness,
   a wrong key, bad hex; a lying relay is skipped for an honest one; outages and not-yet-published rounds. 93.4%.
-- kyber's `sign/bls` is marked deprecated for its rogue-key weakness when aggregating signatures under untrusted keys;
-  drand verification checks one signature under one pinned group key, which that does not affect.
+- Verification uses kyber's `sign/bdn` scheme on G1 (its single-signature check is plain BLS; the older `sign/bls`
+  package is deprecated for a rogue-key weakness that only concerns aggregation).
