@@ -21,6 +21,7 @@ import (
 
 	"github.com/itsivali/lottery-platform/internal/api"
 	"github.com/itsivali/lottery-platform/internal/audit"
+	"github.com/itsivali/lottery-platform/internal/game"
 	"github.com/itsivali/lottery-platform/internal/identity"
 	"github.com/itsivali/lottery-platform/internal/kyc"
 	"github.com/itsivali/lottery-platform/internal/ledger"
@@ -115,6 +116,8 @@ func New(ctx context.Context, cfg config.Config, pool *pgxpool.Pool) (*App, erro
 		a.payments.WithC2B(client, payments.C2BConfig{ShortCode: p.C2BShortCode})
 	}
 
+	gameSvc := game.NewService(pool, clk, idSvc, rgSvc, wallet.NewService(ls), keyring, wallet.ErrInsufficientFunds)
+
 	// One connection per instance listens for payment changes and fans them out to the players' streams.
 	listenCfg := pool.Config().ConnConfig.Copy()
 	a.live = payments.NewLive(func(ctx context.Context) (*pgx.Conn, error) { return pgx.ConnectConfig(ctx, listenCfg) }, payments.LiveConfig{})
@@ -123,7 +126,7 @@ func New(ctx context.Context, cfg config.Config, pool *pgxpool.Pool) (*App, erro
 	go a.live.Run(liveCtx)
 
 	a.Mount = api.Mount(api.Deps{
-		Identity: idSvc, KYC: a.kyc, RG: rgSvc, Payments: a.payments, Live: a.live, CallbackPath: cfg.Payments.CallbackPath,
+		Identity: idSvc, KYC: a.kyc, RG: rgSvc, Payments: a.payments, Game: gameSvc, Live: a.live, CallbackPath: cfg.Payments.CallbackPath,
 		Idem:               idempotency.NewStore(pool),
 		Limiter:            ratelimit.New(vk),
 		TrustedProxyHeader: c.TrustedProxyHeader, TrustedProxyHops: c.TrustedProxyHops,
