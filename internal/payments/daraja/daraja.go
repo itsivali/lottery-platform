@@ -31,6 +31,8 @@ var (
 	ErrRejected       = errors.New("daraja: rejected")
 	ErrInvalidRequest = errors.New("daraja: invalid request")
 	ErrBadCallback    = errors.New("daraja: malformed callback")
+	// ErrBadAmount marks a malformed callback whose amount is not a positive whole number of shillings within limits.
+	ErrBadAmount = errors.New("daraja: amount is not a positive whole number of shillings")
 )
 
 // MaxSTKAmountKES is the largest single M-Pesa transaction Safaricom allows.
@@ -93,6 +95,7 @@ func (c Config) validate() error {
 // Client calls Daraja. It is safe for concurrent use.
 type Client struct {
 	cfg Config
+	c2b *C2BConfig // nil: paybill calls are not configured
 	hc  *http.Client
 	clk clock.Clock
 

@@ -241,6 +241,27 @@ type LedgerTaxRule struct {
 	CreatedAt       time.Time
 }
 
+type PaymentsC2bConfirmation struct {
+	ID                       string
+	TransID                  string
+	Shortcode                string
+	BillRef                  string
+	PayerMsisdn              *string
+	AmountKes                int64
+	RawConfirmation          []byte
+	Conflicting              bool
+	Status                   string
+	StatusRequests           int32
+	StatusRequestedAt        *time.Time
+	OriginatorConversationID *string
+	StatusResult             []byte
+	OutcomeReason            *string
+	PaymentID                pgtype.UUID
+	UnmatchedID              pgtype.UUID
+	CreatedAt                time.Time
+	UpdatedAt                time.Time
+}
+
 type PaymentsC2bUnmatched struct {
 	ID           string
 	MpesaReceipt string
@@ -251,6 +272,10 @@ type PaymentsC2bUnmatched struct {
 	Status       string
 	CreatedAt    time.Time
 	ResolvedAt   *time.Time
+	Reason       string
+	PaymentID    pgtype.UUID
+	RefundRef    *string
+	ResolvedBy   *string
 }
 
 type PaymentsPayment struct {

@@ -53,6 +53,10 @@ func (q *payQueue) EnqueueVerify(_ context.Context, _ pgx.Tx, id string, src pay
 	return q.add("verify:" + string(src) + ":" + id)
 }
 
+func (q *payQueue) EnqueueC2B(_ context.Context, _ pgx.Tx, id string, src payments.VerifySource) error {
+	return q.add("c2b:" + string(src) + ":" + id)
+}
+
 func (q *payQueue) add(s string) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -131,6 +135,10 @@ func setup(t *testing.T) *env {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if dc, err = dc.WithC2B(daraja.C2BConfig{ShortCode: "600982", Initiator: "i", SecurityCredential: "c",
+		ResultURL: "http://api/hooks/c2b/" + callbackPath + "/status-result", TimeoutURL: "http://api/hooks/c2b/" + callbackPath + "/status-timeout"}); err != nil {
+		t.Fatal(err)
+	}
 	ids := identity.NewService(pool, clk, fakeOIDC{}, aw, identity.Config{
 		AuthKey: []byte("0123456789abcdef0123456789abcdef"), TokenKey: priv, Issuer: "lottery", Audience: "lottery-api",
 		AccessTTL: 10 * time.Minute, RefreshTTL: 30 * 24 * time.Hour, DeviceCap: 2,
@@ -141,7 +149,7 @@ func setup(t *testing.T) *env {
 		Identity:     ids,
 		KYC:          kyc.NewService(pool, clk, mock, kr, []byte("0123456789abcdef0123456789abcdef"), aw, enq),
 		RG:           rgs,
-		Payments:     payments.NewService(pool, clk, dc, pay, ids, rgs, wallet.NewService(ls), ls, aw, payments.Config{}),
+		Payments:     payments.NewService(pool, clk, dc, pay, ids, rgs, wallet.NewService(ls), ls, aw, payments.Config{}).WithC2B(dc, payments.C2BConfig{ShortCode: "600982"}),
 		CallbackPath: callbackPath,
 		Idem:         idempotency.NewStore(pool),
 		Limiter:      ratelimit.New(vk.Client(t)),
@@ -669,5 +677,56 @@ func TestAPI_STKCallbackNeedsTheSecretPathAndIsAcknowledgedWithoutAnIdempotencyK
 	}
 	if code, _ := e.callback(t, callbackPath, `<xml/>`); code != http.StatusBadRequest {
 		t.Fatalf("garbage: %d", code)
+	}
+}
+
+func (e *env) hook(t *testing.T, url, body string) (int, string) {
+	t.Helper()
+	req, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, e.srv.URL+url, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	r, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = r.Body.Close() }()
+	raw, _ := io.ReadAll(r.Body)
+	return r.StatusCode, string(raw)
+}
+
+func TestAPI_PaybillHooksNeedTheSecretPathAndAnswerDaraja(t *testing.T) {
+	e := setup(t)
+	confirmation := `{"TransactionType":"Pay Bill","TransID":"TJK1AB2CD3","TransTime":"20261024093112","TransAmount":"150.00",
+"BusinessShortCode":"600982","BillRefNumber":"0700000000","MSISDN":"254708374149","FirstName":"John"}`
+	for _, action := range []string{"validate", "confirm", "status-result", "status-timeout"} {
+		if code, _ := e.hook(t, "/hooks/c2b/"+callbackPath[:63]+"0/"+action, confirmation); code != http.StatusNotFound {
+			t.Errorf("%s with a wrong secret: %d", action, code)
+		}
+	}
+	base := "/hooks/c2b/" + callbackPath
+	if code, raw := e.hook(t, base+"/validate", confirmation); code != http.StatusOK || !strings.Contains(raw, `"ResultCode":"C2B00012"`) ||
+		!strings.Contains(raw, `"Rejected"`) {
+		t.Fatalf("validate an unknown account: %d %s", code, raw)
+	}
+	if code, raw := e.hook(t, base+"/confirm", confirmation); code != http.StatusOK || !strings.Contains(raw, `"ResultCode":0`) {
+		t.Fatalf("confirm: %d %s", code, raw)
+	}
+	e.pay.mu.Lock()
+	jobs := strings.Join(e.pay.jobs, ",")
+	e.pay.mu.Unlock()
+	if !strings.Contains(jobs, "c2b:callback:") {
+		t.Fatalf("jobs = %s: the confirmation must be verified in the background", jobs)
+	}
+	if code, _ := e.hook(t, base+"/confirm", `<xml/>`); code != http.StatusBadRequest {
+		t.Fatalf("garbage confirmation: %d", code)
+	}
+	if code, _ := e.hook(t, base+"/status-result", `{}`); code != http.StatusBadRequest {
+		t.Fatalf("garbage status result: %d", code)
+	}
+	if code, raw := e.hook(t, base+"/status-result", `{"Result":{"ResultCode":1,"OriginatorConversationID":"nobody"}}`); code != http.StatusOK ||
+		!strings.Contains(raw, `"ResultCode":0`) {
+		t.Fatalf("status result: %d %s", code, raw)
+	}
+	if code, _ := e.hook(t, base+"/status-timeout", `not json`); code != http.StatusOK {
+		t.Fatalf("status timeout: %d", code)
 	}
 }

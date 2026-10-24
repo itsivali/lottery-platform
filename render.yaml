@@ -83,3 +83,12 @@ services:
         sync: false
       - key: DARAJA_PASSKEY
         sync: false
+      # Paybill (C2B), verified with the Transaction Status API: all three or none. Sandbox test shortcode 600982;
+      # the initiator and its security credential come from the Daraja portal (Test Credentials page). Register the
+      # hooks once with `lotteryctl payments c2b-register`.
+      - key: DARAJA_C2B_SHORTCODE
+        sync: false
+      - key: DARAJA_INITIATOR_NAME
+        sync: false
+      - key: DARAJA_SECURITY_CREDENTIAL
+        sync: false

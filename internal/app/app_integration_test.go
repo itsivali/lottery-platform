@@ -86,13 +86,15 @@ func TestApp_FullJourneyThroughTheRealWiring(t *testing.T) {
 	var router http.Handler
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { router.ServeHTTP(w, r) }))
 	t.Cleanup(srv.Close)
-	mock := darajamock.New(darajamock.Options{ConsumerKey: "ck", ConsumerSecret: "cs", ShortCode: "174379", Passkey: "pk"})
+	mock := darajamock.New(darajamock.Options{ConsumerKey: "ck", ConsumerSecret: "cs", ShortCode: "174379", Passkey: "pk",
+		C2BShortCode: "600982", Initiator: "testapi", SecurityCredential: "cred"})
 	mock.AutoComplete(ctx, 0) // the customer approves every prompt at once
 	dm := httptest.NewServer(mock)
 	t.Cleanup(dm.Close)
 	cfg := baseCfg(t, g, vk)
 	cfg.Payments = config.Payments{Enabled: true, BaseURL: dm.URL, ConsumerKey: "ck", ConsumerSecret: "cs", ShortCode: "174379",
-		Passkey: "pk", CallbackPath: strings.Repeat("c", 64), PublicURL: srv.URL}
+		Passkey: "pk", CallbackPath: strings.Repeat("c", 64), PublicURL: srv.URL,
+		C2BShortCode: "600982", Initiator: "testapi", SecurityCredential: "cred"}
 
 	a, err := app.New(ctx, cfg, pool)
 	if err != nil {
@@ -161,6 +163,33 @@ func TestApp_FullJourneyThroughTheRealWiring(t *testing.T) {
 	}
 	if p := mock.Pushes(); len(p) != 1 || p[0].MSISDN != "254712345678" || p[0].CallbackURL != srv.URL+"/hooks/mpesa/stk/"+strings.Repeat("c", 64) {
 		t.Fatalf("pushes = %+v", p)
+	}
+
+	// Paybill: the operator registers the hooks; someone pays into 600982 with the (now proved) phone as the account
+	// number; the confirmation hook, the c2b job, Transaction Status and its result hook credit 200 less excise.
+	client, err := app.NewDaraja(cfg.Payments)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.RegisterC2BURLs(ctx, cfg.Payments.C2BURL("validate"), cfg.Payments.C2BURL("confirm"), "Cancelled"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mock.Pay(ctx, 200, "254708374149", "0712345678"); err != nil {
+		t.Fatal(err)
+	}
+	for {
+		if err := pool.QueryRow(ctx, `SELECT balance_kes FROM wallet.wallets`).Scan(&balance); err != nil {
+			t.Fatal(err)
+		}
+		if balance == 95+190 {
+			break
+		}
+		if time.Now().After(deadline.Add(40 * time.Second)) { //nolint:forbidigo // test polling deadline
+			var status string
+			_ = pool.QueryRow(ctx, `SELECT status FROM payments.c2b_confirmations`).Scan(&status)
+			t.Fatalf("paybill payment never credited: balance %d, confirmation %s", balance, status)
+		}
+		time.Sleep(200 * time.Millisecond) //nolint:forbidigo // polling helper
 	}
 }
 

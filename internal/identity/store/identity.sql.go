@@ -300,6 +300,23 @@ func (q *Queries) MarkRefreshUsed(ctx context.Context, arg MarkRefreshUsedParams
 	return err
 }
 
+const provedPhoneOwner = `-- name: ProvedPhoneOwner :one
+SELECT id, status, kyc_status FROM identity.users WHERE msisdn = $1 AND msisdn_verified_at IS NOT NULL
+`
+
+type ProvedPhoneOwnerRow struct {
+	ID        string
+	Status    string
+	KycStatus string
+}
+
+func (q *Queries) ProvedPhoneOwner(ctx context.Context, msisdn string) (ProvedPhoneOwnerRow, error) {
+	row := q.db.QueryRow(ctx, provedPhoneOwner, msisdn)
+	var i ProvedPhoneOwnerRow
+	err := row.Scan(&i.ID, &i.Status, &i.KycStatus)
+	return i, err
+}
+
 const revokeOtherSessions = `-- name: RevokeOtherSessions :exec
 UPDATE identity.sessions SET revoked_at = $1, revoked_reason = 'password_change'
 WHERE user_id = $2 AND id <> $3 AND revoked_at IS NULL

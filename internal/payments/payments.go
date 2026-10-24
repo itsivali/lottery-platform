@@ -89,6 +89,8 @@ type Enqueuer interface {
 	// EnqueueVerify schedules verification. Jobs with the same payment and source collapse into one, so repeated
 	// callbacks or sweeps do not pile up, while a callback is never held back behind a waiting safety-net job.
 	EnqueueVerify(ctx context.Context, tx pgx.Tx, paymentID string, source VerifySource) error
+	// EnqueueC2B schedules the verification of a paybill confirmation, collapsing duplicates the same way.
+	EnqueueC2B(ctx context.Context, tx pgx.Tx, confirmationID string, source VerifySource) error
 }
 
 // VerifySource says what asked for a verification.
@@ -99,11 +101,15 @@ const (
 	AfterPush     VerifySource = "push"
 	AfterCallback VerifySource = "callback"
 	FromSweep     VerifySource = "sweep"
+	// AfterStatus is a paybill Transaction Status answer: its own source, so settlement never waits behind the
+	// confirmation's job while that one is snoozed waiting for the answer.
+	AfterStatus VerifySource = "status"
 )
 
 // Identity is what payments needs from the identity module.
 type Identity interface {
 	AssertCanTopUp(ctx context.Context, tx pgx.Tx, userID string) (string, error)
+	ProvedPhoneOwner(ctx context.Context, tx pgx.Tx, msisdn string) (string, error)
 	MarkPhoneVerified(ctx context.Context, tx pgx.Tx, userID, confirmedMSISDN string) error
 }
 
@@ -121,9 +127,10 @@ type Wallet interface {
 	ReverseDeposit(ctx context.Context, tx pgx.Tx, paymentID, user string, gross, exciseDeducted int64) (ledger.Posting, int64, error)
 }
 
-// TaxRules returns the rule version in force.
-type TaxRules interface {
+// Ledger returns the tax rule version in force and posts journals that touch no wallet (suspense).
+type Ledger interface {
 	ActiveRule(ctx context.Context, tx pgx.Tx, code string, on time.Time) (ledger.TaxRule, error)
+	Post(ctx context.Context, tx pgx.Tx, j ledger.Journal) (string, error)
 }
 
 // Config tunes the service; zero values take the defaults.
@@ -141,13 +148,14 @@ type Service struct {
 	ids    Identity
 	rg     RG
 	wallet Wallet
-	rules  TaxRules
+	rules  Ledger
 	audit  *audit.Writer
 	cfg    Config
+	c2b    *c2bSetup // nil: paybill payments are not configured
 }
 
 // NewService returns a Service. A nil d (an untyped nil, not a nil *daraja.Client) disables top-ups.
-func NewService(pool *pgxpool.Pool, clk clock.Clock, d Daraja, enq Enqueuer, ids Identity, r RG, w Wallet, rules TaxRules, a *audit.Writer, cfg Config) *Service {
+func NewService(pool *pgxpool.Pool, clk clock.Clock, d Daraja, enq Enqueuer, ids Identity, r RG, w Wallet, rules Ledger, a *audit.Writer, cfg Config) *Service {
 	if cfg.VerifyAfter <= 0 {
 		cfg.VerifyAfter = DefaultVerifyAfter
 	}
@@ -401,10 +409,13 @@ type creditInput struct {
 	receipt, payer          string
 	now                     time.Time
 	actor                   audit.Event // who credits: the system after a status query, or an operator from a statement
+	// channel is "c2b" for a paybill payment, which proves no phone (anyone can pay into any account number);
+	// otherwise an STK top-up, whose approved prompt proves the target.
+	channel string
 }
 
 // creditPayment posts a confirmed top-up: the deposit net of excise, recovery of any debt the player owes, the payment
-// marked credited, the phone proof and the audit record, all in the caller's transaction.
+// marked credited, the phone proof (STK only) and the audit record, all in the caller's transaction.
 func (s *Service) creditPayment(ctx context.Context, tx pgx.Tx, in creditInput) error {
 	q := store.New(tx)
 	rule, err := s.rules.ActiveRule(ctx, tx, exciseCode, in.now)
@@ -425,10 +436,14 @@ func (s *Service) creditPayment(ctx context.Context, tx pgx.Tx, in creditInput) 
 	if err := q.MarkCredited(ctx, store.MarkCreditedParams{AmountKes: &in.amount, Receipt: &in.receipt, At: in.now, ID: in.paymentID}); err != nil {
 		return err
 	}
-	phone := s.provePhone(ctx, tx, in.user, in.target, in.payer)
 	ev := in.actor
 	ev.Action, ev.EntityType, ev.EntityID = "payment.topup.credited", "payment", in.paymentID
-	ev.Details = map[string]any{"amount_kes": in.amount, "receipt": in.receipt, "phone_proof": phone, "debt_recovered_kes": recovered}
+	ev.Details = map[string]any{"amount_kes": in.amount, "receipt": in.receipt, "debt_recovered_kes": recovered}
+	if in.channel == "c2b" {
+		ev.Action = "payment.c2b.credited"
+	} else {
+		ev.Details["phone_proof"] = s.provePhone(ctx, tx, in.user, in.target, in.payer)
+	}
 	return s.audit.Record(ctx, tx, ev)
 }
 
@@ -489,20 +504,34 @@ func (s *Service) settle(ctx context.Context, tx pgx.Tx, userID, paymentID, stat
 		Details: map[string]any{"user_id": userID, "reason": reason}})
 }
 
-// Sweep enqueues verification for payments that have been pending longer than the verify delay, in case a job or a
-// callback was lost.
+// Sweep enqueues verification for payments that have been pending longer than the verify delay, and for paybill
+// confirmations whose verification has stalled, in case a job or a callback was lost.
 func (s *Service) Sweep(ctx context.Context) error {
 	return pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
 		now, err := s.clk.Now(ctx, tx)
 		if err != nil {
 			return err
 		}
-		ids, err := store.New(tx).StalePending(ctx, now.Add(-s.cfg.VerifyAfter))
+		q := store.New(tx)
+		ids, err := q.StalePending(ctx, now.Add(-s.cfg.VerifyAfter))
 		if err != nil {
 			return err
 		}
 		for _, id := range ids {
 			if err := s.enq.EnqueueVerify(ctx, tx, id, FromSweep); err != nil {
+				return err
+			}
+		}
+		if s.c2b == nil {
+			return nil
+		}
+		before := now.Add(-s.c2b.cfg.StatusWait)
+		stale, err := q.StaleC2B(ctx, &before)
+		if err != nil {
+			return err
+		}
+		for _, id := range stale {
+			if err := s.enq.EnqueueC2B(ctx, tx, id, FromSweep); err != nil {
 				return err
 			}
 		}

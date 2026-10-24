@@ -37,6 +37,7 @@ var (
 	ErrSSOAlreadyLinked   = errors.New("identity: this identity is already linked")
 	ErrKYCRequired        = errors.New("identity: KYC must be verified first")
 	ErrAttestationFailed  = errors.New("identity: this device failed attestation")
+	ErrNoProvedOwner      = errors.New("identity: no account has proved this number")
 )
 
 // IDTokenVerifier validates a Google or Apple ID token (issuer, audience, expiry, signature, nonce) and returns the

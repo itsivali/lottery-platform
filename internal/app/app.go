@@ -98,11 +98,9 @@ func New(ctx context.Context, cfg config.Config, pool *pgxpool.Pool) (*App, erro
 
 	// Without Daraja configuration the payments service still answers reads but refuses top-ups (fail closed).
 	var dc payments.Daraja
+	var client *daraja.Client
 	if p := cfg.Payments; p.Enabled {
-		client, err := daraja.New(daraja.Config{
-			BaseURL: p.BaseURL, ConsumerKey: p.ConsumerKey, ConsumerSecret: p.ConsumerSecret, ShortCode: p.ShortCode,
-			Passkey: p.Passkey, CallbackURL: p.CallbackURL(), AllowProduction: p.AllowProduction,
-		}, &http.Client{Timeout: 35 * time.Second}, clock.Wall{})
+		client, err = NewDaraja(p)
 		if err != nil {
 			return nil, err
 		}
@@ -110,6 +108,9 @@ func New(ctx context.Context, cfg config.Config, pool *pgxpool.Pool) (*App, erro
 	}
 	ls := ledger.NewStore()
 	a.payments = payments.NewService(pool, clk, dc, payments.NewRiverEnqueuer(insertOnly), idSvc, rgSvc, wallet.NewService(ls), ls, aw, payments.Config{})
+	if p := cfg.Payments; p.C2BEnabled() {
+		a.payments.WithC2B(client, payments.C2BConfig{ShortCode: p.C2BShortCode})
+	}
 
 	a.Mount = api.Mount(api.Deps{
 		Identity: idSvc, KYC: a.kyc, RG: rgSvc, Payments: a.payments, CallbackPath: cfg.Payments.CallbackPath,
@@ -119,8 +120,22 @@ func New(ctx context.Context, cfg config.Config, pool *pgxpool.Pool) (*App, erro
 	})
 	slog.InfoContext(ctx, "v1 API enabled", "trusted_proxy_header", c.TrustedProxyHeader, "trusted_proxy_hops", c.TrustedProxyHops,
 		"kyc_registry", c.KYCURL != "", "google", c.GoogleClientID != "", "apple", c.AppleClientID != "",
-		"payments", cfg.Payments.Enabled, "daraja", cfg.Payments.BaseURL)
+		"payments", cfg.Payments.Enabled, "paybill", cfg.Payments.C2BEnabled(), "daraja", cfg.Payments.BaseURL)
 	return a, nil
+}
+
+// NewDaraja builds the Daraja client from configuration, with the paybill calls when C2B is configured. lotteryctl
+// uses it too, to register the paybill URLs.
+func NewDaraja(p config.Payments) (*daraja.Client, error) {
+	client, err := daraja.New(daraja.Config{
+		BaseURL: p.BaseURL, ConsumerKey: p.ConsumerKey, ConsumerSecret: p.ConsumerSecret, ShortCode: p.ShortCode,
+		Passkey: p.Passkey, CallbackURL: p.CallbackURL(), AllowProduction: p.AllowProduction,
+	}, &http.Client{Timeout: 35 * time.Second}, clock.Wall{})
+	if err != nil || !p.C2BEnabled() {
+		return client, err
+	}
+	return client.WithC2B(daraja.C2BConfig{ShortCode: p.C2BShortCode, Initiator: p.Initiator, SecurityCredential: p.SecurityCredential,
+		ResultURL: p.C2BURL("status-result"), TimeoutURL: p.C2BURL("status-timeout")})
 }
 
 // StartWorkers starts the background job workers (a no-op when the API is not configured).
