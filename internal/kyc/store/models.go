@@ -105,18 +105,20 @@ type GameOddsConfig struct {
 	EffectiveFrom pgtype.Date
 	CreatedBy     string
 	CreatedAt     time.Time
+	PriceKes      int64
 }
 
 type GameSeedChain struct {
-	ID         string
-	UserID     string
-	SeedEnc    []byte
-	Commitment string
-	ClientSeed string
-	NextNonce  int64
-	Status     string
-	CreatedAt  time.Time
-	RevealedAt *time.Time
+	ID           string
+	UserID       string
+	SeedEnc      []byte
+	Commitment   string
+	ClientSeed   string
+	NextNonce    int64
+	Status       string
+	CreatedAt    time.Time
+	RevealedAt   *time.Time
+	RevealedSeed *string
 }
 
 type GameSpin struct {

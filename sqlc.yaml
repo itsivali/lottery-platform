@@ -96,3 +96,19 @@ sql:
           - { db_type: timestamptz, nullable: true, go_type: { type: time.Time, pointer: true } }
           - { db_type: pg_catalog.int4, nullable: true, go_type: { type: int32, pointer: true } }
           - { db_type: pg_catalog.int8, nullable: true, go_type: { type: int64, pointer: true } }
+  - engine: postgresql
+    schema: db/migrations
+    queries: db/queries/game.sql
+    gen:
+      go:
+        package: store
+        out: internal/game/store
+        sql_package: pgx/v5
+        overrides:
+          - { db_type: uuid, go_type: string }
+          - { db_type: uuid, nullable: true, go_type: { type: string, pointer: true } }
+          - { db_type: text, nullable: true, go_type: { type: string, pointer: true } }
+          - { db_type: timestamptz, go_type: time.Time }
+          - { db_type: timestamptz, nullable: true, go_type: { type: time.Time, pointer: true } }
+          - { db_type: date, go_type: time.Time }
+          - { db_type: pg_catalog.date, go_type: time.Time }

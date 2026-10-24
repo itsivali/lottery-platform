@@ -9,11 +9,12 @@ info:
 servers:
   - url: http://localhost:8080
 tags:
-  - name: ops
-  - name: auth
-  - name: kyc
-  - name: responsible-gaming
-  - name: payments
+  - { name: ops, description: "Health probes." }
+  - { name: auth, description: "Sign-up, sign-in, sessions and linked identities." }
+  - { name: kyc, description: "Identity verification (reviewed by staff)." }
+  - { name: responsible-gaming, description: "Deposit limits, time-outs and self-exclusion." }
+  - { name: payments, description: "M-Pesa top-ups and their live updates." }
+  - { name: game, description: "Paid plays, tickets and provably fair spins." }
 paths:
   /healthz:
     get:
@@ -346,6 +347,98 @@ paths:
               schema: { $ref: "#/components/schemas/TopUp" }
         "401": { $ref: "#/components/responses/Problem" }
         "404": { $ref: "#/components/responses/Problem" }
+  /v1/plays:
+    post:
+      operationId: play
+      tags: [game]
+      summary: Buy one play (KES 100) and spin
+      description: |
+        Debits the price of the odds version in force, issues a ticket and spins once with the player's provably fair
+        seed chain, all in one transaction. At most 4 plays per player per Nairobi day (midnight to midnight). A spin
+        on a lucky slot marks the day lucky, which doubles the day's draw chances. Needs a verified ID and a proved
+        phone, no restriction and no debt from a reversed top-up. Replaying the same Idempotency-Key returns the same
+        play (200) and charges nothing.
+      parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
+      responses:
+        "201":
+          description: Played
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PlayResult" }
+        "200":
+          description: The play already made with this Idempotency-Key
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PlayResult" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403":
+          description: KYC (`kyc-required`), phone (`phone-not-verified`), restriction (`restricted`) or debt (`in-debt`)
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+        "409":
+          description: No plays left today (`daily-limit`) or balance below the price (`insufficient-funds`)
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+        "429": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+  /v1/plays/today:
+    get:
+      operationId: playsToday
+      tags: [game]
+      summary: The signed-in player's play day so far (plays, plays left, lucky, chances, price, tickets)
+      responses:
+        "200":
+          description: Today
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Today" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+  /v1/fairness:
+    get:
+      operationId: fairness
+      tags: [game]
+      summary: The player's provably fair seed chains
+      description: |
+        `active` is the chain the next spins use: its server seed is secret, shown only as `commitment` (hex SHA-256
+        of the seed), created before any spin uses it. `rotated` chains have their `revealed_seed`: with it, the
+        client seed and each spin's nonce, anyone can recompute the slots (`tools/verifier`). Slot = first 32-bit
+        big-endian word w of HMAC-SHA256(seed, "client_seed:nonce:round") with w < 2^32 - (2^32 mod slots), taken mod slots.
+      responses:
+        "200":
+          description: Chains
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Fairness" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+  /v1/fairness/rotate:
+    post:
+      operationId: rotateSeed
+      tags: [game]
+      summary: Reveal the active server seed and start a new chain (optionally with the player's own client seed)
+      parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                client_seed: { type: string, pattern: "^[A-Za-z0-9_-]{1,64}$", description: Omit for a random one. }
+      responses:
+        "200":
+          description: The new active chain and the revealed one
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Fairness" }
+        "400": { $ref: "#/components/responses/Problem" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "429": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
   /hooks/mpesa/stk/{path}:
     post:
       operationId: stkCallback
@@ -520,6 +613,64 @@ components:
         application/problem+json:
           schema: { $ref: "#/components/schemas/Problem" }
   schemas:
+    Spin:
+      type: object
+      required: [chain_id, commitment, client_seed, nonce, slot, lucky, slots, lucky_slots]
+      properties:
+        chain_id: { type: string }
+        commitment: { type: string }
+        client_seed: { type: string }
+        nonce: { type: integer }
+        slot: { type: integer, description: "0 to slots-1; slots below lucky_slots are lucky." }
+        lucky: { type: boolean }
+        slots: { type: integer }
+        lucky_slots: { type: integer }
+    Play:
+      type: object
+      required: [ticket_id, play_date, seq, price_kes, status, created_at, spin]
+      properties:
+        ticket_id: { type: string }
+        play_date: { type: string, format: date, description: Nairobi calendar day. }
+        seq: { type: integer, minimum: 1, maximum: 4 }
+        price_kes: { type: integer }
+        status: { type: string, enum: [paid, refunded] }
+        created_at: { type: string, format: date-time }
+        spin: { $ref: "#/components/schemas/Spin" }
+    Today:
+      type: object
+      required: [play_date, plays, plays_left, lucky, chances, price_kes, tickets]
+      properties:
+        play_date: { type: string, format: date }
+        plays: { type: integer }
+        plays_left: { type: integer }
+        lucky: { type: boolean }
+        chances: { type: integer, description: "Draw chances from the tier for today's plays, doubled on a lucky day." }
+        price_kes: { type: integer }
+        tickets: { type: array, items: { $ref: "#/components/schemas/Play" } }
+    PlayResult:
+      type: object
+      required: [play, today, balance_kes]
+      properties:
+        play: { $ref: "#/components/schemas/Play" }
+        today: { $ref: "#/components/schemas/Today" }
+        balance_kes: { type: integer }
+    Chain:
+      type: object
+      required: [id, commitment, client_seed, next_nonce, revealed_seed, created_at, revealed_at]
+      properties:
+        id: { type: string }
+        commitment: { type: string }
+        client_seed: { type: string }
+        next_nonce: { type: integer }
+        revealed_seed: { type: [string, "null"] }
+        created_at: { type: string, format: date-time }
+        revealed_at: { type: [string, "null"], format: date-time }
+    Fairness:
+      type: object
+      required: [active, rotated]
+      properties:
+        active: { $ref: "#/components/schemas/Chain" }
+        rotated: { type: array, items: { $ref: "#/components/schemas/Chain" } }
     TopUpRequest:
       type: object
       additionalProperties: false

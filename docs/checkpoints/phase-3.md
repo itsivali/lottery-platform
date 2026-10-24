@@ -53,3 +53,22 @@ mutation testing of `game`, checkpoint report.
   first word is rejected (nonce 456436 over 40000 slots); both Go implementations must reproduce all of them.
 - Uniformity: chi-square over 100k spins in CI (p = 0.001 threshold); 10 million spins over 12 and over 7 slots in
   the nightly (`-tags distribution`, about a minute).
+
+### Slice 2 (play)
+- Migration `00019`: `price_kes` on the odds version (KES 100), `revealed_seed` on rotated chains (published, checked
+  by constraint to be present exactly when rotated).
+- `internal/game`: `Play` in one transaction (replay by key, `AssertCanPlay`, RG, no debt, odds for the Nairobi day,
+  day row locked, chain locked or created, slot, ticket, `ledger.Stake` through the wallet, spin, nonce, day tally);
+  `Today` (plays, plays left, lucky, chances = tier × 2 on a lucky day, price, tickets with their spins); `Fairness`
+  (creates the first chain so its commitment is shown before any spin); `Rotate` (reveals the seed after checking it
+  against the commitment, starts a new chain with the player's client seed). Server seeds are encrypted with the data
+  keyring, bound to the player.
+- API: `POST /v1/plays` (201, or 200 for a replayed key), `GET /v1/plays/today`, `GET /v1/fairness`,
+  `POST /v1/fairness/rotate`; problems `daily-limit`, `insufficient-funds`, `in-debt`, `restricted`, `kyc-required`,
+  `phone-not-verified`, `invalid-client-seed`. OpenAPI updated (and every tag now has a description: no lint warnings).
+- Tests (integration): price debited and booked to `STAKES_REVENUE`; Nairobi play date at 23:30; spin verified after
+  rotation against the commitment shown before it; the next play uses the new chain from nonce 0; same key charges
+  once; 10 concurrent plays → exactly 4, the rest `daily-limit`, consecutive nonces; the cap resets after Nairobi
+  midnight; chances follow the tiers and double on a lucky day; refusals (low balance, unproved phone, time-out, debt)
+  charge and count nothing; concurrent first fairness requests create one chain. API: the journey to the daily limit,
+  error mapping, and the new routes in the auth and idempotency sweeps.
