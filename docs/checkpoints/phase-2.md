@@ -1,8 +1,9 @@
 # Phase 2 — Payments: checkpoint
 
-Status: IN PROGRESS (started 2026-10-22 on the owner's go-ahead). Slices 1 (#26), 2 (#27), 4 (#13) and 3 (#18, #19)
-merged and live; slice 5 (realtime, ADR 0010) built. The first sandbox top-up from the owner's re-created test
-account was credited and watched over the stream (2026-10-24). Paybill shelved, Buy Goods added (ADR 0011).
+Status: COMPLETE (2026-10-24, closed on the owner's instruction). Slices 1, 2, 4 and 5 are live; slice 3 (C2B) is
+built and deployed but shelved by the owner until a real paybill exists (ADR 0011); top-ups are STK prompts into the
+paybill. The owner's test account topped up KES 10 in the sandbox, was credited net of excise, proved its phone and saw
+the result live over `GET /v1/payments/events`.
 
 ## Plan (written before coding)
 
@@ -170,3 +171,19 @@ Decisions in ADR 0010.
   settlement path is unchanged. Client, config and mock tests. Off everywhere since the sandbox refused it (ADR 0011
   amendment): top-ups are STK prompts into the paybill.
 - Paybill (slice 3) shelved by the owner until a paybill exists.
+
+## Checkpoint (2026-10-24)
+
+| Item | State |
+|---|---|
+| Daraja client and fault-injecting mock | done; live sandbox round trip (4999 handling found live) |
+| STK top-up, verification by status query, excise deducted, exactly once, phone proof | done, live, first real credit 2026-10-24 |
+| Reversals, player debt, internal reconciliation | done, live |
+| C2B paybill (validation, confirmation, Transaction Status, suspense) | built, live, **shelved** (sandbox never called back; no paybill) |
+| Buy Goods (till) | built, **off** (sandbox refuses `CustomerBuyGoodsOnline`) |
+| Realtime confirmation (SSE over LISTEN/NOTIFY) | done, live |
+| Mutation testing | nightly: wallet 100%, ledger 97.7%, payments 89.7% |
+| Statement matching against the M-Pesa statement | not done: needs the production paybill/till statement |
+
+Carried forward: play and withdrawals must refuse players in debt (phase 3 does play), back-office screens for the
+operator actions (phase 6), excise refundability on reversals (owner/tax), production paybill or till (owner).
