@@ -44,7 +44,7 @@ Read this first at the start of every session.
 
 ## Slice 3 (C2B) decisions (owner, 2026-10-22)
 
-- Sandbox C2B test shortcode **600982** (STK Push stays on 174379). Production needs a real paybill later.
+- Sandbox C2B test shortcode **600992** (the Party A on the owner's Test Credentials page; changed from 600982 on 2026-10-24). STK Push stays on 174379. Production needs a real paybill later.
 - **Account number = the player's registered phone number.** Only a *proved* phone matches (an unverified number can
   be claimed by several accounts); anything else goes to suspense for an operator.
 - URLs `/hooks/c2b/{secret}/validate` and `/confirm` (C2B URL registration refuses paths containing "mpesa").
@@ -55,7 +55,7 @@ Read this first at the start of every session.
   operator actions (`lotteryctl payments suspense-credit | suspense-refund | c2b-recheck | c2b-register |
   c2b-simulate`), reconciliation of suspense. Paybill payments never prove a phone.
 - **Needs from the owner:** the sandbox **initiator name** and its **security credential** (Daraja portal, Test
-  Credentials page: the portal encrypts the initiator password into the credential). Then set `DARAJA_C2B_SHORTCODE=600982`,
+  Credentials page: the portal encrypts the initiator password into the credential). Then set `DARAJA_C2B_SHORTCODE=600992`,
   `DARAJA_INITIATOR_NAME`, `DARAJA_SECURITY_CREDENTIAL` on Render, deploy, run `lotteryctl payments c2b-register`, and
   simulate a payment to the test account (`c2b-simulate`).
 

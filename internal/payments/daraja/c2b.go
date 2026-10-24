@@ -119,7 +119,8 @@ func accepted(path string, status int, raw []byte) error {
 	if err := json.Unmarshal(raw, &out); err != nil || out.ResponseCode == "" {
 		return fmt.Errorf("%w: unreadable %s answer", ErrUnavailable, path)
 	}
-	if out.ResponseCode != "0" {
+	// "0" means accepted; the sandbox's URL registration answers "00000000" (seen live 2026-10-24)
+	if strings.Trim(out.ResponseCode, "0") != "" {
 		return fmt.Errorf("%w: %s response code %s", ErrRejected, path, out.ResponseCode)
 	}
 	return nil

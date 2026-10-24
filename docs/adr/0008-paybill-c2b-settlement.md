@@ -6,7 +6,7 @@ Date: 2026-10-24
 ## Context
 Players can also pay into the paybill from the M-Pesa menu, typing an account number. Owner decisions (2026-10-22):
 the account number is the player's registered phone number; only a *proved* phone matches (an unproved number can be
-claimed by several accounts, ADR 0005); the sandbox test shortcode is 600982 while STK stays on 174379. Daraja may
+claimed by several accounts, ADR 0005); the sandbox test shortcode is 600992 (the Party A of the app's test credentials; 600982 at first) while STK stays on 174379. Daraja may
 call a validation URL before the payment and always posts a confirmation after it. Like an STK callback, a
 confirmation is a claim that anyone who learns the URL can forge (ADR 0006). Daraja's Transaction Status API answers,
 asynchronously, whether a receipt completed and for how much, but not which account number was typed.

@@ -26,8 +26,8 @@ services:
   daraja-mock:
     build: { context: ., target: mock, args: { TARGET: mocks/daraja } }
     # every prompt is approved two seconds after it is sent; POST /__mock/fault injects failures. Paybill payments
-    # are simulated with POST /mpesa/c2b/v1/simulate (shortcode 600982); POST /__mock/c2b-fault injects C2B failures.
-    environment: { MOCK_AUTO_COMPLETE: 2s, MOCK_C2B_SHORTCODE: "600982", MOCK_INITIATOR: local, MOCK_SECURITY_CREDENTIAL: bG9jYWwtZGV2LW9ubHk= }
+    # are simulated with POST /mpesa/c2b/v1/simulate (shortcode 600992); POST /__mock/c2b-fault injects C2B failures.
+    environment: { MOCK_AUTO_COMPLETE: 2s, MOCK_C2B_SHORTCODE: "600992", MOCK_INITIATOR: local, MOCK_SECURITY_CREDENTIAL: bG9jYWwtZGV2LW9ubHk= }
     ports: ["8090:8080"]
   kyc-mock:
     build: { context: ., target: mock, args: { TARGET: mocks/stub } }
@@ -65,7 +65,7 @@ services:
       DARAJA_SHORTCODE: "174379"
       DARAJA_PASSKEY: local
       DARAJA_CALLBACK_TOKEN: local-dev-only-callback-token-000000
-      DARAJA_C2B_SHORTCODE: "600982"
+      DARAJA_C2B_SHORTCODE: "600992"
       DARAJA_INITIATOR_NAME: local
       DARAJA_SECURITY_CREDENTIAL: bG9jYWwtZGV2LW9ubHk=
       PUBLIC_BASE_URL: http://api:8080
