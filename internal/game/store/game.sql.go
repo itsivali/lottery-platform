@@ -162,9 +162,9 @@ func (q *Queries) GetPlayerDay(ctx context.Context, arg GetPlayerDayParams) (Get
 	return i, err
 }
 
-const insertChain = `-- name: InsertChain :one
+const insertChain = `-- name: InsertChain :exec
 INSERT INTO game.seed_chains (user_id, seed_enc, commitment, client_seed, created_at)
-VALUES ($1, $2, $3, $4, $5) RETURNING id
+VALUES ($1, $2, $3, $4, $5) ON CONFLICT (user_id) WHERE status = 'active' DO NOTHING
 `
 
 type InsertChainParams struct {
@@ -175,17 +175,16 @@ type InsertChainParams struct {
 	CreatedAt  time.Time
 }
 
-func (q *Queries) InsertChain(ctx context.Context, arg InsertChainParams) (string, error) {
-	row := q.db.QueryRow(ctx, insertChain,
+// does nothing when the player already has an active chain (a concurrent request created it first)
+func (q *Queries) InsertChain(ctx context.Context, arg InsertChainParams) error {
+	_, err := q.db.Exec(ctx, insertChain,
 		arg.UserID,
 		arg.SeedEnc,
 		arg.Commitment,
 		arg.ClientSeed,
 		arg.CreatedAt,
 	)
-	var id string
-	err := row.Scan(&id)
-	return id, err
+	return err
 }
 
 const insertReconciliationRun = `-- name: InsertReconciliationRun :exec

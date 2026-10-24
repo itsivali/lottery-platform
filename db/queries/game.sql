@@ -31,9 +31,10 @@ WHERE user_id = $1 AND status = 'active' FOR UPDATE;
 -- name: GetActiveChain :one
 SELECT id, commitment, client_seed, next_nonce, created_at FROM game.seed_chains WHERE user_id = $1 AND status = 'active';
 
--- name: InsertChain :one
+-- name: InsertChain :exec
+-- does nothing when the player already has an active chain (a concurrent request created it first)
 INSERT INTO game.seed_chains (user_id, seed_enc, commitment, client_seed, created_at)
-VALUES ($1, $2, $3, $4, $5) RETURNING id;
+VALUES ($1, $2, $3, $4, $5) ON CONFLICT (user_id) WHERE status = 'active' DO NOTHING;
 
 -- name: AdvanceNonce :exec
 UPDATE game.seed_chains SET next_nonce = next_nonce + 1 WHERE id = $1;
