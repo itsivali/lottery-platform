@@ -41,6 +41,8 @@ type Push struct {
 	AmountKES         int64
 	AccountRef        string
 	CallbackURL       string
+	TransactionType   string // CustomerPayBillOnline or CustomerBuyGoodsOnline
+	PartyB            string // the shortcode or till that receives the money
 }
 
 type txn struct {
@@ -175,6 +177,14 @@ func (s *Server) push(w http.ResponseWriter, _ *http.Request, body map[string]an
 	msisdn, _ := body["PhoneNumber"].(string)
 	ref, _ := body["AccountReference"].(string)
 	cb, _ := body["CallBackURL"].(string)
+	kind, _ := body["TransactionType"].(string)
+	partyB, _ := body["PartyB"].(string)
+	// Daraja refuses a paybill payment into anything but the signing shortcode, and a Buy Goods payment without a till
+	if (kind != "CustomerPayBillOnline" || partyB != s.opts.ShortCode) && (kind != "CustomerBuyGoodsOnline" || partyB == "") {
+		s.mu.Unlock()
+		writeErr(w, http.StatusBadRequest, "400.002.02", "Bad Request - Invalid TransactionType or PartyB")
+		return
+	}
 	if amount <= 0 || msisdn == "" || cb == "" {
 		s.mu.Unlock()
 		writeErr(w, http.StatusBadRequest, "400.002.02", "Bad Request - Invalid Amount or PhoneNumber")
@@ -183,7 +193,7 @@ func (s *Server) push(w http.ResponseWriter, _ *http.Request, body map[string]an
 	s.seq++
 	t := &txn{fault: f, Push: Push{
 		CheckoutRequestID: "ws_CO_MOCK_" + strconv.Itoa(s.seq), MerchantRequestID: "mock-" + strconv.Itoa(s.seq),
-		MSISDN: msisdn, AmountKES: int64(amount), AccountRef: ref, CallbackURL: cb,
+		MSISDN: msisdn, AmountKES: int64(amount), AccountRef: ref, CallbackURL: cb, TransactionType: kind, PartyB: partyB,
 	}}
 	s.txns[t.CheckoutRequestID] = t
 	s.order = append(s.order, t.CheckoutRequestID)

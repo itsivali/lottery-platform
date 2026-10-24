@@ -130,7 +130,7 @@ func New(ctx context.Context, cfg config.Config, pool *pgxpool.Pool) (*App, erro
 	})
 	slog.InfoContext(ctx, "v1 API enabled", "trusted_proxy_header", c.TrustedProxyHeader, "trusted_proxy_hops", c.TrustedProxyHops,
 		"kyc_registry", c.KYCURL != "", "google", c.GoogleClientID != "", "apple", c.AppleClientID != "",
-		"payments", cfg.Payments.Enabled, "paybill", cfg.Payments.C2BEnabled(), "daraja", cfg.Payments.BaseURL)
+		"payments", cfg.Payments.Enabled, "buy_goods", cfg.Payments.TillNumber != "", "paybill", cfg.Payments.C2BEnabled(), "daraja", cfg.Payments.BaseURL)
 	return a, nil
 }
 
@@ -139,7 +139,7 @@ func New(ctx context.Context, cfg config.Config, pool *pgxpool.Pool) (*App, erro
 func NewDaraja(p config.Payments) (*daraja.Client, error) {
 	client, err := daraja.New(daraja.Config{
 		BaseURL: p.BaseURL, ConsumerKey: p.ConsumerKey, ConsumerSecret: p.ConsumerSecret, ShortCode: p.ShortCode,
-		Passkey: p.Passkey, CallbackURL: p.CallbackURL(), AllowProduction: p.AllowProduction,
+		Passkey: p.Passkey, TillNumber: p.TillNumber, CallbackURL: p.CallbackURL(), AllowProduction: p.AllowProduction,
 	}, &http.Client{Timeout: 35 * time.Second}, clock.Wall{})
 	if err != nil || !p.C2BEnabled() {
 		return client, err

@@ -21,7 +21,8 @@ type Payments struct {
 	ConsumerSecret  string
 	ShortCode       string
 	Passkey         string
-	AllowProduction bool // required to use api.safaricom.co.ke
+	TillNumber      string // optional: Buy Goods into this till instead of paybill payments into ShortCode
+	AllowProduction bool   // required to use api.safaricom.co.ke
 
 	// CallbackPath is the unguessable last segment of the callback URL: a hex SHA-256 of DARAJA_CALLBACK_TOKEN, so a
 	// generated base64 secret (which may contain '/') is always safe in a path.
@@ -91,7 +92,7 @@ func loadPayments(api API) (Payments, error) {
 	p := Payments{
 		Enabled: true, BaseURL: getenv("DARAJA_BASE_URL", SandboxURL),
 		ConsumerKey: os.Getenv("DARAJA_CONSUMER_KEY"), ConsumerSecret: os.Getenv("DARAJA_CONSUMER_SECRET"),
-		ShortCode: os.Getenv("DARAJA_SHORTCODE"), Passkey: os.Getenv("DARAJA_PASSKEY"),
+		ShortCode: os.Getenv("DARAJA_SHORTCODE"), Passkey: os.Getenv("DARAJA_PASSKEY"), TillNumber: os.Getenv("DARAJA_TILL_NUMBER"),
 		AllowProduction: os.Getenv("DARAJA_ALLOW_PRODUCTION") == "true",
 		PublicURL:       strings.TrimRight(getenv("PUBLIC_BASE_URL", os.Getenv("RENDER_EXTERNAL_URL")), "/"),
 	}
