@@ -100,6 +100,15 @@ func TestRegisterC2BURLs_SendsTheShortcodeURLsAndResponseType(t *testing.T) {
 	}
 }
 
+func TestRegisterC2BURLs_AcceptsTheSandboxsZeroPaddedSuccessCode(t *testing.T) {
+	c := c2bServer(t, func(w http.ResponseWriter, _ string, _ map[string]any) {
+		_, _ = w.Write([]byte(`{"OriginatorCoversationID":"b65b-47a4","ResponseCode":"00000000","ResponseDescription":"Success"}`))
+	})
+	if err := c.RegisterC2BURLs(context.Background(), "https://a/v", "https://a/c", daraja.C2BCancelOnTimeout); err != nil {
+		t.Fatalf("the sandbox's success answer was refused: %v", err)
+	}
+}
+
 func TestRegisterC2BURLs_ClassifiesRefusalsAndOutages(t *testing.T) {
 	for _, tc := range []struct {
 		status int
@@ -109,6 +118,7 @@ func TestRegisterC2BURLs_ClassifiesRefusalsAndOutages(t *testing.T) {
 		{400, `{"requestId":"r","errorCode":"400.003.02","errorMessage":"Bad Request - Invalid ValidationURL"}`, daraja.ErrRejected},
 		{500, `{"requestId":"r","errorCode":"500.003.1001","errorMessage":"Internal Server Error"}`, daraja.ErrUnavailable},
 		{200, `{"ResponseCode":"1","ResponseDescription":"failed"}`, daraja.ErrRejected},
+		{200, `{"ResponseCode":"00000001","ResponseDescription":"failed"}`, daraja.ErrRejected},
 		{200, `not json`, daraja.ErrUnavailable},
 	} {
 		c := c2bServer(t, func(w http.ResponseWriter, _ string, _ map[string]any) {

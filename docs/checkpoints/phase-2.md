@@ -40,7 +40,7 @@ amount credits what was paid; a callback for a number that another account alrea
 ### Slice 3 — C2B
 Validation/confirmation URLs registered against the paybill; account reference → verified player; unmatched receipts
 go to `payments.c2b_unmatched` and the `SUSPENSE` account; back-office resolution later. Owner decisions
-(2026-10-22): sandbox shortcode 600982, account number = the registered phone, only a proved phone matches, confirmations
+(2026-10-22): sandbox shortcode 600982 (600992 from 2026-10-24, the test credentials' Party A), account number = the registered phone, only a proved phone matches, confirmations
 verified with the Transaction Status API before crediting.
 
 ### Slice 4 — Reconciliation and reversals

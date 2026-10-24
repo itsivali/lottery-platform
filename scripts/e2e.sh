@@ -40,12 +40,12 @@ for _ in $(seq 1 60); do
 done
 [ "$status" = credited ] || { echo "top-up never credited (status: $status)"; docker compose logs api daraja-mock | tail -30; exit 1; }
 
-# Paybill: register the hooks with the mock, pay into 600982 with the player's phone (proved by the top-up above) as
+# Paybill: register the hooks with the mock, pay into 600992 with the player's phone (proved by the top-up above) as
 # the account number, and wait until the confirmation is verified with Transaction Status and credited.
 hook="http://api:8080/hooks/c2b/$(printf %s local-dev-only-callback-token-000000 | sha256sum | cut -d' ' -f1)"
 mock() { curl -fsS -X POST "localhost:8090$1" -H 'Authorization: Bearer mock-access-token' -H 'Content-Type: application/json' -d "$2" >/dev/null; }
-mock /mpesa/c2b/v1/registerurl "{\"ShortCode\":\"600982\",\"ResponseType\":\"Cancelled\",\"ValidationURL\":\"$hook/validate\",\"ConfirmationURL\":\"$hook/confirm\"}"
-mock /mpesa/c2b/v1/simulate '{"ShortCode":"600982","CommandID":"CustomerPayBillOnline","Amount":200,"Msisdn":"254708374149","BillRefNumber":"0712345678"}'
+mock /mpesa/c2b/v1/registerurl "{\"ShortCode\":\"600992\",\"ResponseType\":\"Cancelled\",\"ValidationURL\":\"$hook/validate\",\"ConfirmationURL\":\"$hook/confirm\"}"
+mock /mpesa/c2b/v1/simulate '{"ShortCode":"600992","CommandID":"CustomerPayBillOnline","Amount":200,"Msisdn":"254708374149","BillRefNumber":"0712345678"}'
 for _ in $(seq 1 60); do
   status=$(docker compose exec -T postgres psql -U lottery -d lottery -tAc "SELECT status FROM payments.c2b_confirmations LIMIT 1")
   [ "$status" = credited ] && break
