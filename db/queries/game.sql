@@ -135,3 +135,11 @@ SELECT count(*)::bigint AS tickets, coalesce(sum(price_kes), 0)::bigint AS kes F
 
 -- name: InsertReconciliationRun :exec
 INSERT INTO game.reconciliation_runs (ran_at, ok, report) VALUES ($1, $2, $3);
+
+-- name: PoolFundingTotal :one
+-- what approved draws moved from STAKES_REVENUE into the prize pools (phase 4)
+SELECT coalesce(sum(e.amount_kes), 0)::bigint
+FROM ledger.ledger_entries e
+JOIN ledger.ledger_journals j ON j.id = e.journal_id
+JOIN ledger.ledger_accounts a ON a.id = e.account_id
+WHERE j.kind = 'prize_pool_funding' AND a.code = 'STAKES_REVENUE' AND e.direction = 'D';

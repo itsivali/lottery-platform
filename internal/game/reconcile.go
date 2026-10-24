@@ -68,9 +68,16 @@ func (s *Service) Reconcile(ctx context.Context) (Report, error) {
 		if err != nil {
 			return err
 		}
+		funded, err := q.PoolFundingTotal(ctx)
+		if err != nil {
+			return err
+		}
 		r.Totals["stakes_revenue_kes"], r.Totals["paid_tickets"], r.Totals["paid_tickets_kes"] = revenue, paid.Tickets, paid.Kes
-		if revenue != paid.Kes {
-			r.Mismatches["revenue_vs_tickets"] = []string{"STAKES_REVENUE " + strconv.FormatInt(revenue, 10) + " != paid tickets " + strconv.FormatInt(paid.Kes, 10)}
+		r.Totals["prize_pools_funded_kes"] = funded
+		// approved draws move their pools out of stakes revenue (phase 4)
+		if revenue != paid.Kes-funded {
+			r.Mismatches["revenue_vs_tickets"] = []string{"STAKES_REVENUE " + strconv.FormatInt(revenue, 10) + " != paid tickets " +
+				strconv.FormatInt(paid.Kes, 10) + " - prize pools funded " + strconv.FormatInt(funded, 10)}
 		}
 		r.OK = len(r.Mismatches) == 0
 		return nil

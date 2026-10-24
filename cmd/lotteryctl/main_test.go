@@ -57,6 +57,14 @@ func TestParse(t *testing.T) {
 			command{name: "game simulate", days: 500, slots: 10, lucky: 2, price: 50}, false},
 		{[]string{"game", "simulate", "-days", "-1"}, command{}, true},
 		{[]string{"game", "simulate", "-operator", "w"}, command{}, true},
+		{[]string{"draws", "list"}, command{name: "draws list"}, false},
+		{[]string{"draws", "show", "-draw", "d-1"}, command{name: "draws show", draw: "d-1"}, false},
+		{[]string{"draws", "sign", "-draw", "d-1", "-operator", "willis"}, command{name: "draws sign", draw: "d-1", operator: "operator:willis"}, false},
+		{[]string{"draws", "sign", "-draw", "d-1"}, command{}, true}, // no official
+		{[]string{"draws", "approve", "-draw", "d-1", "-operator", "w"}, command{name: "draws approve", draw: "d-1", operator: "operator:w"}, false},
+		{[]string{"draws", "void", "-draw", "d-1", "-operator", "w"}, command{}, true}, // no reason
+		{[]string{"draws", "void", "-draw", "d-1", "-reason", "wrong entries", "-operator", "w"},
+			command{name: "draws void", draw: "d-1", reason: "wrong entries", operator: "operator:w"}, false},
 		{[]string{"bogus"}, command{}, true},
 		{nil, command{}, true},
 	}
