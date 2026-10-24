@@ -1,6 +1,7 @@
 package ledger_test
 
 import (
+	"slices"
 	"testing"
 
 	"pgregory.net/rapid"
@@ -432,5 +433,35 @@ func TestPostingRules_AcceptExactlyTheMaximumAmountAndNothingAbove(t *testing.T)
 	}
 	if got, err := ledger.Apply(ledger.MaxAmountKES, ledger.RateFromE5(100000), ledger.HalfUp); err != nil || got != ledger.MaxAmountKES {
 		t.Errorf("Apply(max, 100%%) = %d, %v", got, err)
+	}
+}
+
+func TestC2BSuspense_ParksReleasesAndRefundsWithoutTouchingAWallet(t *testing.T) {
+	park, err := ledger.C2BSuspense("item-1", 150)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if park.UserID != "" || len(park.WalletTxs) != 0 || park.Journal.Kind != "c2b_suspense" || park.Journal.RefType != "c2b_unmatched" {
+		t.Fatalf("park = %+v", park)
+	}
+	want := []ledger.Entry{{Account: ledger.MpesaClearing, Dir: ledger.Debit, AmountKES: 150}, {Account: ledger.Suspense, Dir: ledger.Credit, AmountKES: 150}}
+	if !slices.Equal(park.Journal.Entries, want) {
+		t.Fatalf("park entries = %+v", park.Journal.Entries)
+	}
+	for _, f := range []func(string, int64) (ledger.Posting, error){ledger.C2BSuspenseRelease, ledger.C2BSuspenseRefund} {
+		p, err := f("item-1", 150)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := []ledger.Entry{{Account: ledger.Suspense, Dir: ledger.Debit, AmountKES: 150}, {Account: ledger.MpesaClearing, Dir: ledger.Credit, AmountKES: 150}}
+		if !slices.Equal(p.Journal.Entries, want) || p.UserID != "" {
+			t.Fatalf("%s entries = %+v", p.Journal.Kind, p.Journal.Entries)
+		}
+		if _, err := f("item-1", 0); err == nil {
+			t.Fatalf("%s accepted zero", p.Journal.Kind)
+		}
+	}
+	if _, err := ledger.C2BSuspense("item-1", -1); err == nil {
+		t.Fatal("negative accepted")
 	}
 }

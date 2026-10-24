@@ -35,6 +35,17 @@ func (s *Service) AssertCanTopUp(ctx context.Context, tx pgx.Tx, userID string) 
 	return u.Msisdn, nil
 }
 
+// ProvedPhoneOwner returns the account that has proved msisdn, or ErrNoProvedOwner. Only a proved number identifies an
+// account: an unproved one may be claimed by several accounts. Paybill payments use it to find whose account number
+// (the registered phone) a customer typed; eligibility is checked separately (AssertCanTopUp).
+func (s *Service) ProvedPhoneOwner(ctx context.Context, tx pgx.Tx, msisdn string) (string, error) {
+	u, err := store.New(tx).ProvedPhoneOwner(ctx, msisdn)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", ErrNoProvedOwner
+	}
+	return u.ID, err
+}
+
 // AssertCanPlay is AssertCanTopUp plus a proved phone number, which is what pays out and receives alerts. Called inside
 // the same transaction as the debit.
 func (s *Service) AssertCanPlay(ctx context.Context, tx pgx.Tx, userID string) error {

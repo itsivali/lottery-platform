@@ -261,3 +261,29 @@ func DebtRecovery(paymentID, user string, amount int64) (Posting, error) {
 	return build("debt_recovery", "payment", paymentID, user, []WalletTx{{Kind: "debt_recovery", AmountKES: -amount}},
 		d(WalletLiability, amount, user), c(PlayerDebt, amount, user))
 }
+
+// C2BSuspense parks a verified paybill payment that matches no eligible account: M-Pesa holds the money
+// (MPESA_CLEARING) and the operator owes it to someone not yet known (SUSPENSE). Keyed on the suspense item.
+func C2BSuspense(itemID string, amount int64) (Posting, error) {
+	if err := positive(amount); err != nil {
+		return Posting{}, err
+	}
+	return build("c2b_suspense", "c2b_unmatched", itemID, "", nil, d(MpesaClearing, amount, ""), c(Suspense, amount, ""))
+}
+
+// C2BSuspenseRelease takes a suspense item out of suspense so it can be credited as an ordinary deposit (which debits
+// MPESA_CLEARING again), leaving each M-Pesa shilling counted once.
+func C2BSuspenseRelease(itemID string, amount int64) (Posting, error) {
+	if err := positive(amount); err != nil {
+		return Posting{}, err
+	}
+	return build("c2b_suspense_release", "c2b_unmatched", itemID, "", nil, d(Suspense, amount, ""), c(MpesaClearing, amount, ""))
+}
+
+// C2BSuspenseRefund records that a suspense item was sent back to the payer through M-Pesa.
+func C2BSuspenseRefund(itemID string, amount int64) (Posting, error) {
+	if err := positive(amount); err != nil {
+		return Posting{}, err
+	}
+	return build("c2b_suspense_refund", "c2b_unmatched", itemID, "", nil, d(Suspense, amount, ""), c(MpesaClearing, amount, ""))
+}

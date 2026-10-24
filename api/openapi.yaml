@@ -352,6 +352,127 @@ paths:
                   ResultDesc: { type: string }
         "400": { $ref: "#/components/responses/Problem" }
         "404": { $ref: "#/components/responses/Problem" }
+  /hooks/c2b/{path}/validate:
+    post:
+      operationId: c2bValidate
+      tags: [payments]
+      summary: Daraja paybill validation (accept or refuse a payment before it happens)
+      description: |
+        Called by Safaricom, not by clients. Authenticated by the secret path segment (the same one as the STK
+        callback), which is only ever sent to Daraja; needs no token and no Idempotency-Key. 404 when paybill
+        payments are not configured.
+        Answers ResultCode "0" to accept, or a C2B000xx code to refuse (unknown account, bad amount, wrong
+        shortcode, or any other reason including a failure to decide). Writes nothing.
+      security: []
+      parameters:
+        - { name: path, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object }
+      responses:
+        "200":
+          description: Accepted ("0") or refused (C2B000xx)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ResultCode: { oneOf: [{ type: integer }, { type: string }] }
+                  ResultDesc: { type: string }
+        "404": { $ref: "#/components/responses/Problem" }
+  /hooks/c2b/{path}/confirm:
+    post:
+      operationId: c2bConfirm
+      tags: [payments]
+      summary: Daraja paybill confirmation
+      description: |
+        Called by Safaricom, not by clients. Authenticated by the secret path segment (the same one as the STK
+        callback), which is only ever sent to Daraja; needs no token and no Idempotency-Key. 404 when paybill
+        payments are not configured.
+        The confirmation is stored and verified with the Transaction Status API before any money moves; it is then
+        credited to the account whose proved phone is the account number, or parked in suspense.
+      security: []
+      parameters:
+        - { name: path, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object }
+      responses:
+        "200":
+          description: Stored
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ResultCode: { oneOf: [{ type: integer }, { type: string }] }
+                  ResultDesc: { type: string }
+        "400": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+  /hooks/c2b/{path}/status-result:
+    post:
+      operationId: c2bStatusResult
+      tags: [payments]
+      summary: Daraja Transaction Status result
+      description: |
+        Called by Safaricom, not by clients. Authenticated by the secret path segment (the same one as the STK
+        callback), which is only ever sent to Daraja; needs no token and no Idempotency-Key. 404 when paybill
+        payments are not configured.
+        The answer to a status request about a paybill payment; it is stored and settles the payment in the
+        background.
+      security: []
+      parameters:
+        - { name: path, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object }
+      responses:
+        "200":
+          description: Stored
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ResultCode: { oneOf: [{ type: integer }, { type: string }] }
+                  ResultDesc: { type: string }
+        "400": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+  /hooks/c2b/{path}/status-timeout:
+    post:
+      operationId: c2bStatusTimeout
+      tags: [payments]
+      summary: Daraja Transaction Status queue timeout
+      description: |
+        Called by Safaricom, not by clients. Authenticated by the secret path segment (the same one as the STK
+        callback), which is only ever sent to Daraja; needs no token and no Idempotency-Key. 404 when paybill
+        payments are not configured.
+        Daraja gave up on a status request; verification asks again on its own schedule.
+      security: []
+      parameters:
+        - { name: path, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object }
+      responses:
+        "200":
+          description: Acknowledged
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ResultCode: { oneOf: [{ type: integer }, { type: string }] }
+                  ResultDesc: { type: string }
+        "404": { $ref: "#/components/responses/Problem" }
 components:
   securitySchemes:
     bearer:

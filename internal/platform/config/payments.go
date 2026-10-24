@@ -27,6 +27,24 @@ type Payments struct {
 	// generated base64 secret (which may contain '/') is always safe in a path.
 	CallbackPath string
 	PublicURL    string // the API's public origin (PUBLIC_BASE_URL, else Render's RENDER_EXTERNAL_URL)
+
+	// Paybill (C2B) payments, verified with the Transaction Status API. All three are set, or none (C2B off).
+	C2BShortCode       string // the paybill customers pay into (sandbox test shortcode 600982)
+	Initiator          string // the API initiator's user name
+	SecurityCredential string // the initiator's password encrypted with Safaricom's certificate, from the Daraja portal
+}
+
+// C2BEnabled reports whether paybill payments are configured.
+func (p Payments) C2BEnabled() bool { return p.C2BShortCode != "" }
+
+// C2BRoute is where Daraja posts paybill validations, confirmations and Transaction Status answers:
+// C2BRoute + CallbackPath + "/" + one of validate, confirm, status-result, status-timeout. C2B URL registration refuses
+// URLs containing "mpesa", so these live apart from the STK callback.
+const C2BRoute = "/hooks/c2b/"
+
+// C2BURL is the public URL of one paybill hook.
+func (p Payments) C2BURL(action string) string {
+	return p.PublicURL + C2BRoute + p.CallbackPath + "/" + action
 }
 
 // SandboxURL is Safaricom's Daraja sandbox.
@@ -38,18 +56,30 @@ const CallbackRoute = "/hooks/mpesa/stk/"
 // CallbackURL is the URL handed to Daraja with every push.
 func (p Payments) CallbackURL() string { return p.PublicURL + CallbackRoute + p.CallbackPath }
 
-var darajaCredentials = []string{"DARAJA_CONSUMER_KEY", "DARAJA_CONSUMER_SECRET", "DARAJA_SHORTCODE", "DARAJA_PASSKEY"}
+var (
+	darajaCredentials = []string{"DARAJA_CONSUMER_KEY", "DARAJA_CONSUMER_SECRET", "DARAJA_SHORTCODE", "DARAJA_PASSKEY"}
+	c2bSettings       = []string{"DARAJA_C2B_SHORTCODE", "DARAJA_INITIATOR_NAME", "DARAJA_SECURITY_CREDENTIAL"}
+)
 
-func loadPayments(api API) (Payments, error) {
-	var set, missing []string
-	for _, k := range darajaCredentials {
+// partly splits keys into those set and those missing in the environment.
+func partly(keys []string) (set, missing []string) {
+	for _, k := range keys {
 		if os.Getenv(k) != "" {
 			set = append(set, k)
 		} else {
 			missing = append(missing, k)
 		}
 	}
+	return set, missing
+}
+
+func loadPayments(api API) (Payments, error) {
+	set, missing := partly(darajaCredentials)
+	c2bSet, c2bMissing := partly(c2bSettings)
 	if len(set) == 0 {
+		if len(c2bSet) > 0 {
+			return Payments{}, fmt.Errorf("config: %s set but the Daraja app credentials are not", strings.Join(c2bSet, ", "))
+		}
 		return Payments{}, nil
 	}
 	if len(missing) > 0 {
@@ -86,5 +116,9 @@ func loadPayments(api API) (Payments, error) {
 	if u, _ := url.Parse(p.BaseURL); u.Hostname() == "api.safaricom.co.ke" && !p.AllowProduction {
 		return Payments{}, errors.New("config: DARAJA_BASE_URL is production; set DARAJA_ALLOW_PRODUCTION=true only when that is intended")
 	}
+	if len(c2bSet) > 0 && len(c2bMissing) > 0 {
+		return Payments{}, fmt.Errorf("config: paybill payments are partly configured (%s set) but %s missing", strings.Join(c2bSet, ", "), strings.Join(c2bMissing, ", "))
+	}
+	p.C2BShortCode, p.Initiator, p.SecurityCredential = os.Getenv("DARAJA_C2B_SHORTCODE"), os.Getenv("DARAJA_INITIATOR_NAME"), os.Getenv("DARAJA_SECURITY_CREDENTIAL")
 	return p, nil
 }

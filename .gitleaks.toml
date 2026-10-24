@@ -6,6 +6,7 @@ useDefault = true
 # The local Docker Compose stack uses throwaway credentials whose plaintext starts with "local-dev-" (base64 prefix
 # below). Singular [allowlist] because CI's gitleaks action (8.24) predates [[allowlists]]. Only secrets with that exact prefix are ignored, so a real key pasted into docker-compose.yml is still caught.
 [allowlist]
-description = "throwaway local-development credentials (plaintext starts with 'local-dev-')"
+description = "throwaway local-development credentials (plaintext starts with 'local-dev-') and the mock's public token"
 regexTarget = "secret"
-regexes = ['''^bG9jYWwtZGV2LW''']
+# The Daraja mock's fixed bearer token (internal/payments/darajamock) is public by design.
+regexes = ['''^bG9jYWwtZGV2LW''', '''^mock-access-token$''']

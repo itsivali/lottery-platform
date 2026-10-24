@@ -25,6 +25,15 @@ type VerifyArgs struct {
 // Kind implements river.JobArgs.
 func (VerifyArgs) Kind() string { return "payments.stk_verify" }
 
+// C2BVerifyArgs verifies and settles a paybill confirmation.
+type C2BVerifyArgs struct {
+	ConfirmationID string       `json:"confirmation_id"`
+	Source         VerifySource `json:"source"`
+}
+
+// Kind implements river.JobArgs.
+func (C2BVerifyArgs) Kind() string { return "payments.c2b_verify" }
+
 // ReconcileArgs runs the daily internal reconciliation.
 type ReconcileArgs struct{}
 
@@ -58,6 +67,13 @@ func (e *RiverEnqueuer) EnqueueVerify(ctx context.Context, tx pgx.Tx, paymentID 
 	return err
 }
 
+// EnqueueC2B implements Enqueuer.
+func (e *RiverEnqueuer) EnqueueC2B(ctx context.Context, tx pgx.Tx, confirmationID string, source VerifySource) error {
+	_, err := e.client.InsertTx(ctx, tx, C2BVerifyArgs{ConfirmationID: confirmationID, Source: source},
+		&river.InsertOpts{MaxAttempts: verifyMaxAttempts, UniqueOpts: river.UniqueOpts{ByArgs: true}})
+	return err
+}
+
 type pushWorker struct {
 	river.WorkerDefaults[PushArgs]
 	svc *Service
@@ -74,6 +90,22 @@ type verifyWorker struct {
 
 func (w *verifyWorker) Work(ctx context.Context, j *river.Job[VerifyArgs]) error {
 	d, err := w.svc.Verify(ctx, j.Args.PaymentID)
+	if err != nil {
+		return err
+	}
+	if d > 0 {
+		return river.JobSnooze(d)
+	}
+	return nil
+}
+
+type c2bWorker struct {
+	river.WorkerDefaults[C2BVerifyArgs]
+	svc *Service
+}
+
+func (w *c2bWorker) Work(ctx context.Context, j *river.Job[C2BVerifyArgs]) error {
+	d, err := w.svc.VerifyC2B(ctx, j.Args.ConfirmationID)
 	if err != nil {
 		return err
 	}
@@ -109,6 +141,7 @@ const SweepEvery = time.Minute
 func AddWorkers(ws *river.Workers, svc *Service) {
 	river.AddWorker(ws, &pushWorker{svc: svc})
 	river.AddWorker(ws, &verifyWorker{svc: svc})
+	river.AddWorker(ws, &c2bWorker{svc: svc})
 	river.AddWorker(ws, &sweepWorker{svc: svc})
 	river.AddWorker(ws, &reconcileWorker{svc: svc})
 }

@@ -4,8 +4,8 @@ Read this first at the start of every session.
 
 - **Phase:** 1 — Foundations: complete. **Phase 2 — Payments: in progress** (`docs/checkpoints/phase-2.md`). Slices 1
   (Daraja client + mock), 2 (STK top-up, ADR 0006) and 4 (reversals, player debt, internal reconciliation, ADR 0007)
-  are merged and live. **Next: slice 3, C2B on the Daraja sandbox** (decisions below), then slice 5 (realtime).
-- **Session saved 2026-10-22.** Resume with slice 3 after the owner items below.
+  are merged and live. **Slice 3 (C2B paybill, ADR 0008) is built and tested against the mock (2026-10-24);** its live
+  sandbox run waits for the initiator credentials (below). Then slice 5 (realtime).
 - **Repo state:** the GitHub repository was **deleted and recreated on 2026-10-22** (to drop co-author attribution that
   GitHub kept in old PR refs and caches) and `main` was pushed from the local clone. PR numbers below #8 in these docs
   refer to the deleted repository. Commits and PRs carry only the owner's name.
@@ -51,7 +51,13 @@ Read this first at the start of every session.
   Validation rejects unknown accounts, restricted players, deposits over a limit and bad amounts. A confirmation is
   stored and verified with Daraja's **Transaction Status API** before it is credited (ADR 0006), through the same
   credit path as STK top-ups.
-- **Needs from the owner:** the sandbox **initiator name and password** (Test Credentials page) for Transaction Status.
+- **Built (2026-10-24, ADR 0008):** validation, confirmation, Transaction Status verification, credit or suspense,
+  operator actions (`lotteryctl payments suspense-credit | suspense-refund | c2b-recheck | c2b-register |
+  c2b-simulate`), reconciliation of suspense. Paybill payments never prove a phone.
+- **Needs from the owner:** the sandbox **initiator name** and its **security credential** (Daraja portal, Test
+  Credentials page: the portal encrypts the initiator password into the credential). Then set `DARAJA_C2B_SHORTCODE=600982`,
+  `DARAJA_INITIATOR_NAME`, `DARAJA_SECURITY_CREDENTIAL` on Render, deploy, run `lotteryctl payments c2b-register`, and
+  simulate a payment to the test account (`c2b-simulate`).
 
 ## Owner items open at the end of the session
 

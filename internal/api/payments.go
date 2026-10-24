@@ -116,3 +116,86 @@ func (h *handlers) stkCallback(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"ResultCode": 0, "ResultDesc": "Accepted"})
 	}
 }
+
+// c2bHook checks the secret path segment of a paybill hook and reads the body. Without paybill configuration, or
+// with a wrong secret, the hooks do not exist (404).
+func (h *handlers) c2bHook(w http.ResponseWriter, r *http.Request) ([]byte, bool) {
+	path := chi.URLParam(r, "path")
+	if h.Payments == nil || !h.Payments.C2BEnabled() || h.CallbackPath == "" || subtle.ConstantTimeCompare([]byte(path), []byte(h.CallbackPath)) != 1 {
+		httpx.WriteProblem(w, http.StatusNotFound, "not-found", "Not found", "")
+		return nil, false
+	}
+	raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<16))
+	if err != nil {
+		httpx.WriteProblem(w, http.StatusBadRequest, "bad-callback", "Unreadable callback", "")
+		return nil, false
+	}
+	return raw, true
+}
+
+func darajaAck(w http.ResponseWriter, code any, desc string) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"ResultCode": code, "ResultDesc": desc})
+}
+
+// c2bValidate answers Daraja's question whether to accept a paybill payment before it happens. Any failure to decide
+// refuses the payment (the paybill URLs are registered to cancel when we cannot answer, too).
+func (h *handlers) c2bValidate(w http.ResponseWriter, r *http.Request) {
+	raw, ok := h.c2bHook(w, r)
+	if !ok {
+		return
+	}
+	code, err := h.Payments.ValidateC2B(r.Context(), raw)
+	if err != nil {
+		slog.ErrorContext(r.Context(), "paybill validation failed; refusing the payment", "err", err)
+	}
+	desc := "Accepted"
+	if code != payments.C2BAccept {
+		desc = "Rejected"
+	}
+	darajaAck(w, code, desc)
+}
+
+// c2bConfirm stores a paybill confirmation; it is verified with the Transaction Status API before any money moves.
+func (h *handlers) c2bConfirm(w http.ResponseWriter, r *http.Request) {
+	raw, ok := h.c2bHook(w, r)
+	if !ok {
+		return
+	}
+	switch err := h.Payments.HandleC2BConfirmation(r.Context(), raw); {
+	case errors.Is(err, daraja.ErrBadCallback):
+		slog.WarnContext(r.Context(), "malformed paybill confirmation", "err", err)
+		httpx.WriteProblem(w, http.StatusBadRequest, "bad-callback", "Malformed callback", "")
+	case err != nil:
+		internalError(w, err)
+	default:
+		darajaAck(w, 0, "Success")
+	}
+}
+
+// c2bStatusResult receives Daraja's answer to a Transaction Status request.
+func (h *handlers) c2bStatusResult(w http.ResponseWriter, r *http.Request) {
+	raw, ok := h.c2bHook(w, r)
+	if !ok {
+		return
+	}
+	switch err := h.Payments.HandleC2BStatusResult(r.Context(), raw); {
+	case errors.Is(err, daraja.ErrBadCallback):
+		slog.WarnContext(r.Context(), "malformed transaction status result", "err", err)
+		httpx.WriteProblem(w, http.StatusBadRequest, "bad-callback", "Malformed callback", "")
+	case err != nil:
+		internalError(w, err)
+	default:
+		darajaAck(w, 0, "Accepted")
+	}
+}
+
+// c2bStatusTimeout receives Daraja's notice that a Transaction Status request timed out in its queue.
+func (h *handlers) c2bStatusTimeout(w http.ResponseWriter, r *http.Request) {
+	raw, ok := h.c2bHook(w, r)
+	if !ok {
+		return
+	}
+	h.Payments.HandleC2BStatusTimeout(r.Context(), raw)
+	darajaAck(w, 0, "Accepted")
+}

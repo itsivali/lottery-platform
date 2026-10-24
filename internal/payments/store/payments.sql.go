@@ -23,6 +23,30 @@ func (q *Queries) AccountBalance(ctx context.Context, code string) (int64, error
 	return column_1, err
 }
 
+const conflictsAfterCredit = `-- name: ConflictsAfterCredit :many
+SELECT trans_id FROM payments.c2b_confirmations WHERE conflicting AND status = 'credited' ORDER BY created_at
+`
+
+func (q *Queries) ConflictsAfterCredit(ctx context.Context) ([]string, error) {
+	rows, err := q.db.Query(ctx, conflictsAfterCredit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []string
+	for rows.Next() {
+		var trans_id string
+		if err := rows.Scan(&trans_id); err != nil {
+			return nil, err
+		}
+		items = append(items, trans_id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const creditedTotal = `-- name: CreditedTotal :one
 SELECT coalesce(sum(amount_confirmed_kes), 0)::bigint FROM payments.payments WHERE status = 'credited'
 `
@@ -158,6 +182,38 @@ func (q *Queries) DepositedSince(ctx context.Context, arg DepositedSinceParams) 
 	return column_1, err
 }
 
+const getC2B = `-- name: GetC2B :one
+SELECT id, trans_id, shortcode, bill_ref, payer_msisdn, amount_kes, raw_confirmation, conflicting, status, status_requests,
+       status_requested_at, originator_conversation_id, status_result, outcome_reason, payment_id, unmatched_id, created_at, updated_at
+FROM payments.c2b_confirmations WHERE id = $1
+`
+
+func (q *Queries) GetC2B(ctx context.Context, id string) (PaymentsC2bConfirmation, error) {
+	row := q.db.QueryRow(ctx, getC2B, id)
+	var i PaymentsC2bConfirmation
+	err := row.Scan(
+		&i.ID,
+		&i.TransID,
+		&i.Shortcode,
+		&i.BillRef,
+		&i.PayerMsisdn,
+		&i.AmountKes,
+		&i.RawConfirmation,
+		&i.Conflicting,
+		&i.Status,
+		&i.StatusRequests,
+		&i.StatusRequestedAt,
+		&i.OriginatorConversationID,
+		&i.StatusResult,
+		&i.OutcomeReason,
+		&i.PaymentID,
+		&i.UnmatchedID,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const getPayment = `-- name: GetPayment :one
 SELECT id, user_id, status, amount_requested_kes, amount_confirmed_kes, msisdn, checkout_request_id, mpesa_receipt,
        raw_callback, failure_reason, result_code, created_at, updated_at
@@ -217,6 +273,66 @@ func (q *Queries) GetPaymentByKey(ctx context.Context, arg GetPaymentByKeyParams
 	return id, err
 }
 
+const insertC2BConfirmation = `-- name: InsertC2BConfirmation :one
+INSERT INTO payments.c2b_confirmations (trans_id, shortcode, bill_ref, payer_msisdn, amount_kes, raw_confirmation, created_at, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $7)
+ON CONFLICT (trans_id) DO NOTHING
+RETURNING id
+`
+
+type InsertC2BConfirmationParams struct {
+	TransID     string
+	Shortcode   string
+	BillRef     string
+	PayerMsisdn *string
+	AmountKes   int64
+	Raw         []byte
+	At          time.Time
+}
+
+// C2B (paybill). A confirmation is stored once per receipt; a repeat returns no row.
+func (q *Queries) InsertC2BConfirmation(ctx context.Context, arg InsertC2BConfirmationParams) (string, error) {
+	row := q.db.QueryRow(ctx, insertC2BConfirmation,
+		arg.TransID,
+		arg.Shortcode,
+		arg.BillRef,
+		arg.PayerMsisdn,
+		arg.AmountKes,
+		arg.Raw,
+		arg.At,
+	)
+	var id string
+	err := row.Scan(&id)
+	return id, err
+}
+
+const insertC2BPayment = `-- name: InsertC2BPayment :one
+INSERT INTO payments.payments (user_id, channel, amount_requested_kes, msisdn, idempotency_key, created_at, updated_at)
+VALUES ($1, 'c2b', $2, $3, $4, $5, $5)
+RETURNING id
+`
+
+type InsertC2BPaymentParams struct {
+	UserID         string
+	AmountKes      int64
+	Msisdn         *string
+	IdempotencyKey string
+	At             time.Time
+}
+
+func (q *Queries) InsertC2BPayment(ctx context.Context, arg InsertC2BPaymentParams) (string, error) {
+	row := q.db.QueryRow(ctx, insertC2BPayment,
+		arg.UserID,
+		arg.AmountKes,
+		arg.Msisdn,
+		arg.IdempotencyKey,
+		arg.At,
+	)
+	var id string
+	err := row.Scan(&id)
+	return id, err
+}
+
 const insertOrphanCallback = `-- name: InsertOrphanCallback :exec
 INSERT INTO payments.stk_orphan_callbacks (checkout_request_id, raw_payload) VALUES ($1, $2)
 `
@@ -271,6 +387,120 @@ func (q *Queries) InsertTopUp(ctx context.Context, arg InsertTopUpParams) (strin
 	var id string
 	err := row.Scan(&id)
 	return id, err
+}
+
+const insertUnmatched = `-- name: InsertUnmatched :one
+INSERT INTO payments.c2b_unmatched (mpesa_receipt, msisdn, account_ref, amount_kes, raw_payload, reason, created_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7)
+RETURNING id
+`
+
+type InsertUnmatchedParams struct {
+	Receipt    string
+	Msisdn     *string
+	AccountRef *string
+	AmountKes  int64
+	Raw        []byte
+	Reason     string
+	At         time.Time
+}
+
+func (q *Queries) InsertUnmatched(ctx context.Context, arg InsertUnmatchedParams) (string, error) {
+	row := q.db.QueryRow(ctx, insertUnmatched,
+		arg.Receipt,
+		arg.Msisdn,
+		arg.AccountRef,
+		arg.AmountKes,
+		arg.Raw,
+		arg.Reason,
+		arg.At,
+	)
+	var id string
+	err := row.Scan(&id)
+	return id, err
+}
+
+const lockC2B = `-- name: LockC2B :one
+SELECT id, trans_id, shortcode, bill_ref, payer_msisdn, amount_kes, raw_confirmation, conflicting, status, status_requests,
+       status_requested_at, originator_conversation_id, status_result, outcome_reason, payment_id, unmatched_id, created_at, updated_at
+FROM payments.c2b_confirmations WHERE id = $1 FOR UPDATE
+`
+
+func (q *Queries) LockC2B(ctx context.Context, id string) (PaymentsC2bConfirmation, error) {
+	row := q.db.QueryRow(ctx, lockC2B, id)
+	var i PaymentsC2bConfirmation
+	err := row.Scan(
+		&i.ID,
+		&i.TransID,
+		&i.Shortcode,
+		&i.BillRef,
+		&i.PayerMsisdn,
+		&i.AmountKes,
+		&i.RawConfirmation,
+		&i.Conflicting,
+		&i.Status,
+		&i.StatusRequests,
+		&i.StatusRequestedAt,
+		&i.OriginatorConversationID,
+		&i.StatusResult,
+		&i.OutcomeReason,
+		&i.PaymentID,
+		&i.UnmatchedID,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const lockC2BByTransID = `-- name: LockC2BByTransID :one
+SELECT id, shortcode, bill_ref, payer_msisdn, amount_kes, status FROM payments.c2b_confirmations WHERE trans_id = $1 FOR UPDATE
+`
+
+type LockC2BByTransIDRow struct {
+	ID          string
+	Shortcode   string
+	BillRef     string
+	PayerMsisdn *string
+	AmountKes   int64
+	Status      string
+}
+
+func (q *Queries) LockC2BByTransID(ctx context.Context, transID string) (LockC2BByTransIDRow, error) {
+	row := q.db.QueryRow(ctx, lockC2BByTransID, transID)
+	var i LockC2BByTransIDRow
+	err := row.Scan(
+		&i.ID,
+		&i.Shortcode,
+		&i.BillRef,
+		&i.PayerMsisdn,
+		&i.AmountKes,
+		&i.Status,
+	)
+	return i, err
+}
+
+const lockC2BForResult = `-- name: LockC2BForResult :one
+SELECT id, status FROM payments.c2b_confirmations
+WHERE originator_conversation_id = $1 OR ($2::text <> '' AND trans_id = $2::text)
+ORDER BY (originator_conversation_id = $1) DESC LIMIT 1 FOR UPDATE
+`
+
+type LockC2BForResultParams struct {
+	Originator *string
+	Receipt    string
+}
+
+type LockC2BForResultRow struct {
+	ID     string
+	Status string
+}
+
+// a status result names the request it answers; an answer to an earlier request is matched by its receipt instead
+func (q *Queries) LockC2BForResult(ctx context.Context, arg LockC2BForResultParams) (LockC2BForResultRow, error) {
+	row := q.db.QueryRow(ctx, lockC2BForResult, arg.Originator, arg.Receipt)
+	var i LockC2BForResultRow
+	err := row.Scan(&i.ID, &i.Status)
+	return i, err
 }
 
 const lockPayment = `-- name: LockPayment :one
@@ -355,6 +585,68 @@ func (q *Queries) LockPaymentByReceipt(ctx context.Context, mpesaReceipt *string
 	return i, err
 }
 
+const lockUnmatchedByReceipt = `-- name: LockUnmatchedByReceipt :one
+SELECT id, mpesa_receipt, account_ref, amount_kes, status, reason FROM payments.c2b_unmatched WHERE mpesa_receipt = $1 FOR UPDATE
+`
+
+type LockUnmatchedByReceiptRow struct {
+	ID           string
+	MpesaReceipt string
+	AccountRef   *string
+	AmountKes    int64
+	Status       string
+	Reason       string
+}
+
+func (q *Queries) LockUnmatchedByReceipt(ctx context.Context, mpesaReceipt string) (LockUnmatchedByReceiptRow, error) {
+	row := q.db.QueryRow(ctx, lockUnmatchedByReceipt, mpesaReceipt)
+	var i LockUnmatchedByReceiptRow
+	err := row.Scan(
+		&i.ID,
+		&i.MpesaReceipt,
+		&i.AccountRef,
+		&i.AmountKes,
+		&i.Status,
+		&i.Reason,
+	)
+	return i, err
+}
+
+const markC2BConflicting = `-- name: MarkC2BConflicting :exec
+UPDATE payments.c2b_confirmations SET conflicting = true, updated_at = $1 WHERE id = $2
+`
+
+type MarkC2BConflictingParams struct {
+	At time.Time
+	ID string
+}
+
+func (q *Queries) MarkC2BConflicting(ctx context.Context, arg MarkC2BConflictingParams) error {
+	_, err := q.db.Exec(ctx, markC2BConflicting, arg.At, arg.ID)
+	return err
+}
+
+const markC2BStatusRequested = `-- name: MarkC2BStatusRequested :execrows
+UPDATE payments.c2b_confirmations
+   SET status = 'status_requested', status_requests = status_requests + 1, status_requested_at = $1,
+       originator_conversation_id = $2, updated_at = $1
+ WHERE id = $3 AND status IN ('received','status_requested')
+`
+
+type MarkC2BStatusRequestedParams struct {
+	At         *time.Time
+	Originator *string
+	ID         string
+}
+
+func (q *Queries) MarkC2BStatusRequested(ctx context.Context, arg MarkC2BStatusRequestedParams) (int64, error) {
+	result, err := q.db.Exec(ctx, markC2BStatusRequested, arg.At, arg.Originator, arg.ID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const markCredited = `-- name: MarkCredited :exec
 UPDATE payments.payments
    SET status = 'credited', amount_confirmed_kes = $1, mpesa_receipt = $2,
@@ -423,6 +715,30 @@ func (q *Queries) MarkSTKSent(ctx context.Context, arg MarkSTKSentParams) (int64
 	return result.RowsAffected(), nil
 }
 
+const openSuspense = `-- name: OpenSuspense :many
+SELECT mpesa_receipt FROM payments.c2b_unmatched WHERE status = 'open' ORDER BY created_at
+`
+
+func (q *Queries) OpenSuspense(ctx context.Context) ([]string, error) {
+	rows, err := q.db.Query(ctx, openSuspense)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []string
+	for rows.Next() {
+		var mpesa_receipt string
+		if err := rows.Scan(&mpesa_receipt); err != nil {
+			return nil, err
+		}
+		items = append(items, mpesa_receipt)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const orphanCallback = `-- name: OrphanCallback :one
 SELECT raw_payload FROM payments.stk_orphan_callbacks WHERE checkout_request_id = $1 ORDER BY received_at DESC LIMIT 1
 `
@@ -433,6 +749,31 @@ func (q *Queries) OrphanCallback(ctx context.Context, checkoutRequestID string) 
 	var raw_payload []byte
 	err := row.Scan(&raw_payload)
 	return raw_payload, err
+}
+
+const overdueC2B = `-- name: OverdueC2B :many
+SELECT trans_id FROM payments.c2b_confirmations
+WHERE status IN ('received','status_requested','status_received') AND created_at < $1 ORDER BY created_at
+`
+
+func (q *Queries) OverdueC2B(ctx context.Context, createdAt time.Time) ([]string, error) {
+	rows, err := q.db.Query(ctx, overdueC2B, createdAt)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []string
+	for rows.Next() {
+		var trans_id string
+		if err := rows.Scan(&trans_id); err != nil {
+			return nil, err
+		}
+		items = append(items, trans_id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const overduePending = `-- name: OverduePending :many
@@ -495,6 +836,17 @@ func (q *Queries) PlayersInDebt(ctx context.Context) ([]PlayersInDebtRow, error)
 	return items, nil
 }
 
+const receiptCredited = `-- name: ReceiptCredited :one
+SELECT EXISTS (SELECT 1 FROM payments.payments WHERE mpesa_receipt = $1)
+`
+
+func (q *Queries) ReceiptCredited(ctx context.Context, mpesaReceipt *string) (bool, error) {
+	row := q.db.QueryRow(ctx, receiptCredited, mpesaReceipt)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
+}
+
 const receiptUsedElsewhere = `-- name: ReceiptUsedElsewhere :one
 SELECT EXISTS (SELECT 1 FROM payments.payments WHERE mpesa_receipt = $1 AND id <> $2)
 `
@@ -535,6 +887,43 @@ func (q *Queries) RecentOrphanCallbacks(ctx context.Context, receivedAt time.Tim
 	return items, nil
 }
 
+const recheckC2B = `-- name: RecheckC2B :execrows
+UPDATE payments.c2b_confirmations
+   SET status = 'received', status_result = NULL, originator_conversation_id = NULL, outcome_reason = NULL,
+       status_requests = 0, status_requested_at = NULL, updated_at = $1
+ WHERE trans_id = $2 AND status = 'unverified'
+`
+
+type RecheckC2BParams struct {
+	At      time.Time
+	TransID string
+}
+
+func (q *Queries) RecheckC2B(ctx context.Context, arg RecheckC2BParams) (int64, error) {
+	result, err := q.db.Exec(ctx, recheckC2B, arg.At, arg.TransID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const recordC2BStatusResult = `-- name: RecordC2BStatusResult :exec
+UPDATE payments.c2b_confirmations
+   SET status = 'status_received', status_result = $1, updated_at = $2
+ WHERE id = $3
+`
+
+type RecordC2BStatusResultParams struct {
+	Result []byte
+	At     time.Time
+	ID     string
+}
+
+func (q *Queries) RecordC2BStatusResult(ctx context.Context, arg RecordC2BStatusResultParams) error {
+	_, err := q.db.Exec(ctx, recordC2BStatusResult, arg.Result, arg.At, arg.ID)
+	return err
+}
+
 const recordCallback = `-- name: RecordCallback :exec
 UPDATE payments.payments
    SET status = CASE WHEN status IN ('initiated','stk_sent') THEN 'callback_received' ELSE status END,
@@ -550,6 +939,52 @@ type RecordCallbackParams struct {
 
 func (q *Queries) RecordCallback(ctx context.Context, arg RecordCallbackParams) error {
 	_, err := q.db.Exec(ctx, recordCallback, arg.RawCallback, arg.At, arg.ID)
+	return err
+}
+
+const refundUnmatched = `-- name: RefundUnmatched :exec
+UPDATE payments.c2b_unmatched
+   SET status = 'refunded', refund_ref = $1, resolved_at = $2, resolved_by = $3
+ WHERE id = $4 AND status = 'open'
+`
+
+type RefundUnmatchedParams struct {
+	RefundRef *string
+	At        *time.Time
+	Operator  *string
+	ID        string
+}
+
+func (q *Queries) RefundUnmatched(ctx context.Context, arg RefundUnmatchedParams) error {
+	_, err := q.db.Exec(ctx, refundUnmatched,
+		arg.RefundRef,
+		arg.At,
+		arg.Operator,
+		arg.ID,
+	)
+	return err
+}
+
+const resolveUnmatched = `-- name: ResolveUnmatched :exec
+UPDATE payments.c2b_unmatched
+   SET status = 'resolved', payment_id = $1, resolved_at = $2, resolved_by = $3
+ WHERE id = $4 AND status = 'open'
+`
+
+type ResolveUnmatchedParams struct {
+	PaymentID *string
+	At        *time.Time
+	Operator  *string
+	ID        string
+}
+
+func (q *Queries) ResolveUnmatched(ctx context.Context, arg ResolveUnmatchedParams) error {
+	_, err := q.db.Exec(ctx, resolveUnmatched,
+		arg.PaymentID,
+		arg.At,
+		arg.Operator,
+		arg.ID,
+	)
 	return err
 }
 
@@ -580,6 +1015,34 @@ func (q *Queries) ReversalMismatch(ctx context.Context) ([]string, error) {
 	return items, nil
 }
 
+const setC2BOutcome = `-- name: SetC2BOutcome :exec
+UPDATE payments.c2b_confirmations
+   SET status = $1, outcome_reason = $2, payment_id = $3,
+       unmatched_id = $4, updated_at = $5
+ WHERE id = $6
+`
+
+type SetC2BOutcomeParams struct {
+	Status      string
+	Reason      *string
+	PaymentID   *string
+	UnmatchedID *string
+	At          time.Time
+	ID          string
+}
+
+func (q *Queries) SetC2BOutcome(ctx context.Context, arg SetC2BOutcomeParams) error {
+	_, err := q.db.Exec(ctx, setC2BOutcome,
+		arg.Status,
+		arg.Reason,
+		arg.PaymentID,
+		arg.UnmatchedID,
+		arg.At,
+		arg.ID,
+	)
+	return err
+}
+
 const setPaymentOutcome = `-- name: SetPaymentOutcome :exec
 UPDATE payments.payments
    SET status = $1, failure_reason = $2, result_code = $3,
@@ -604,6 +1067,34 @@ func (q *Queries) SetPaymentOutcome(ctx context.Context, arg SetPaymentOutcomePa
 		arg.ID,
 	)
 	return err
+}
+
+const staleC2B = `-- name: StaleC2B :many
+SELECT id FROM payments.c2b_confirmations
+WHERE status IN ('received','status_requested','status_received') AND coalesce(status_requested_at, updated_at) < $1
+ORDER BY created_at LIMIT 100
+`
+
+// Confirmations whose verification may have stalled: never asked about, asked without an answer for a while, or
+// answered without being settled.
+func (q *Queries) StaleC2B(ctx context.Context, statusRequestedAt *time.Time) ([]string, error) {
+	rows, err := q.db.Query(ctx, staleC2B, statusRequestedAt)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const stalePending = `-- name: StalePending :many
@@ -632,6 +1123,46 @@ func (q *Queries) StalePending(ctx context.Context, createdAt time.Time) ([]stri
 	return items, nil
 }
 
+const suspenseOpenTotal = `-- name: SuspenseOpenTotal :one
+SELECT coalesce(sum(amount_kes), 0)::bigint FROM payments.c2b_unmatched WHERE status = 'open'
+`
+
+func (q *Queries) SuspenseOpenTotal(ctx context.Context) (int64, error) {
+	row := q.db.QueryRow(ctx, suspenseOpenTotal)
+	var column_1 int64
+	err := row.Scan(&column_1)
+	return column_1, err
+}
+
+const suspenseWithoutJournal = `-- name: SuspenseWithoutJournal :many
+SELECT u.id::text FROM payments.c2b_unmatched u
+WHERE NOT EXISTS (SELECT 1 FROM ledger.ledger_journals j WHERE j.kind = 'c2b_suspense' AND j.reference_type = 'c2b_unmatched' AND j.reference_id = u.id)
+   OR (u.status <> 'open') <> EXISTS (SELECT 1 FROM ledger.ledger_journals j
+        WHERE j.kind IN ('c2b_suspense_release','c2b_suspense_refund') AND j.reference_type = 'c2b_unmatched' AND j.reference_id = u.id)
+ORDER BY 1
+`
+
+// every suspense item has its parking journal, and a settled one its release or refund journal
+func (q *Queries) SuspenseWithoutJournal(ctx context.Context) ([]string, error) {
+	rows, err := q.db.Query(ctx, suspenseWithoutJournal)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []string
+	for rows.Next() {
+		var u_id string
+		if err := rows.Scan(&u_id); err != nil {
+			return nil, err
+		}
+		items = append(items, u_id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const unconfirmedPayments = `-- name: UnconfirmedPayments :many
 SELECT id FROM payments.payments WHERE status = 'unconfirmed' ORDER BY created_at
 `
@@ -649,6 +1180,30 @@ func (q *Queries) UnconfirmedPayments(ctx context.Context) ([]string, error) {
 			return nil, err
 		}
 		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const unverifiedC2B = `-- name: UnverifiedC2B :many
+SELECT trans_id FROM payments.c2b_confirmations WHERE status = 'unverified' ORDER BY created_at
+`
+
+func (q *Queries) UnverifiedC2B(ctx context.Context) ([]string, error) {
+	rows, err := q.db.Query(ctx, unverifiedC2B)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []string
+	for rows.Next() {
+		var trans_id string
+		if err := rows.Scan(&trans_id); err != nil {
+			return nil, err
+		}
+		items = append(items, trans_id)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err

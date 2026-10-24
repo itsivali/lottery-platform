@@ -74,3 +74,6 @@ SELECT msisdn, (msisdn_verified_at IS NOT NULL)::boolean AS verified FROM identi
 -- name: MarkPhoneVerified :exec
 UPDATE identity.users SET msisdn_verified_at = $2, updated_at = $2 WHERE id = $1 AND msisdn_verified_at IS NULL;
 
+
+-- name: ProvedPhoneOwner :one
+SELECT id, status, kyc_status FROM identity.users WHERE msisdn = $1 AND msisdn_verified_at IS NOT NULL;

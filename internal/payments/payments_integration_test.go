@@ -42,6 +42,9 @@ func (q *queue) EnqueuePush(_ context.Context, _ pgx.Tx, id string) error { retu
 func (q *queue) EnqueueVerify(_ context.Context, _ pgx.Tx, id string, _ payments.VerifySource) error {
 	return q.add("verify", id)
 }
+func (q *queue) EnqueueC2B(_ context.Context, _ pgx.Tx, id string, _ payments.VerifySource) error {
+	return q.add("c2b", id)
+}
 
 func (q *queue) add(kind, id string) error {
 	q.mu.Lock()
@@ -68,6 +71,7 @@ type env struct {
 	rg   *rg.Service
 	// retries collects the snooze delays Verify asked for
 	retries []time.Duration
+	hooks   string // base URL of the stand-in API hooks
 }
 
 var start = time.Date(2026, 10, 22, 9, 0, 0, 0, time.UTC)
@@ -88,14 +92,32 @@ func setupWith(t *testing.T, withDaraja bool) *env {
 
 	if withDaraja {
 		var svc *payments.Service
+		// plays the API's hooks: the STK callback at the root, the paybill hooks at their own paths
 		cb := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			raw, _ := io.ReadAll(r.Body)
-			if err := svc.HandleCallback(r.Context(), raw); err != nil {
-				t.Errorf("callback: %v", err)
+			var err error
+			switch r.URL.Path {
+			case "/validate":
+				var code string
+				code, err = svc.ValidateC2B(r.Context(), raw)
+				_, _ = w.Write([]byte(`{"ResultCode":"` + code + `"}`))
+			case "/confirm":
+				err = svc.HandleC2BConfirmation(r.Context(), raw)
+			case "/status-result":
+				err = svc.HandleC2BStatusResult(r.Context(), raw)
+			case "/status-timeout":
+				svc.HandleC2BStatusTimeout(r.Context(), raw)
+			default:
+				err = svc.HandleCallback(r.Context(), raw)
+			}
+			if err != nil {
+				t.Errorf("%s: %v", r.URL.Path, err)
 			}
 		}))
 		t.Cleanup(cb.Close)
-		e.mock = darajamock.New(darajamock.Options{ConsumerKey: "ck", ConsumerSecret: "cs", ShortCode: "174379", Passkey: "pk", HTTPClient: cb.Client()})
+		e.hooks = cb.URL
+		e.mock = darajamock.New(darajamock.Options{ConsumerKey: "ck", ConsumerSecret: "cs", ShortCode: "174379", Passkey: "pk",
+			C2BShortCode: "600982", Initiator: "testapi", SecurityCredential: "cred", HTTPClient: cb.Client()})
 		ms := httptest.NewServer(e.mock)
 		t.Cleanup(ms.Close)
 		c, err := daraja.New(daraja.Config{BaseURL: ms.URL, ConsumerKey: "ck", ConsumerSecret: "cs", ShortCode: "174379", Passkey: "pk", CallbackURL: cb.URL},
@@ -103,7 +125,15 @@ func setupWith(t *testing.T, withDaraja bool) *env {
 		if err != nil {
 			t.Fatal(err)
 		}
-		svc = payments.NewService(pool, e.clk, c, e.q, e.ids, e.rg, wallet.NewService(ls), ls, aw, payments.Config{})
+		if c, err = c.WithC2B(daraja.C2BConfig{ShortCode: "600982", Initiator: "testapi", SecurityCredential: "cred",
+			ResultURL: cb.URL + "/status-result", TimeoutURL: cb.URL + "/status-timeout"}); err != nil {
+			t.Fatal(err)
+		}
+		if err := c.RegisterC2BURLs(context.Background(), cb.URL+"/validate", cb.URL+"/confirm", daraja.C2BCancelOnTimeout); err != nil {
+			t.Fatal(err)
+		}
+		svc = payments.NewService(pool, e.clk, c, e.q, e.ids, e.rg, wallet.NewService(ls), ls, aw, payments.Config{}).
+			WithC2B(c, payments.C2BConfig{ShortCode: "600982", MaxStatusRequests: 3})
 		e.svc = svc
 		return e
 	}
@@ -150,7 +180,18 @@ func (e *env) run(t *testing.T) {
 				if d > 0 {
 					e.retries = append(e.retries, d)
 				}
+			case "c2b":
+				d, err := e.svc.VerifyC2B(ctx, j.paymentID)
+				if err != nil {
+					t.Fatalf("c2b job: %v", err)
+				}
+				if d > 0 {
+					e.retries = append(e.retries, d)
+				}
 			}
+		}
+		if e.mock != nil {
+			e.mock.Flush() // Daraja's asynchronous answers may enqueue more work
 		}
 	}
 	t.Fatal("jobs keep enqueueing jobs")

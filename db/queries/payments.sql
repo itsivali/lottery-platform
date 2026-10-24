@@ -144,3 +144,112 @@ ORDER BY 1;
 
 -- name: InsertReconciliationRun :exec
 INSERT INTO payments.reconciliation_runs (ran_at, ok, report) VALUES ($1, $2, $3);
+
+-- C2B (paybill). A confirmation is stored once per receipt; a repeat returns no row.
+-- name: InsertC2BConfirmation :one
+INSERT INTO payments.c2b_confirmations (trans_id, shortcode, bill_ref, payer_msisdn, amount_kes, raw_confirmation, created_at, updated_at)
+VALUES (sqlc.arg(trans_id), sqlc.arg(shortcode), sqlc.arg(bill_ref), sqlc.narg(payer_msisdn), sqlc.arg(amount_kes), sqlc.arg(raw), sqlc.arg(at), sqlc.arg(at))
+ON CONFLICT (trans_id) DO NOTHING
+RETURNING id;
+
+-- name: LockC2BByTransID :one
+SELECT id, shortcode, bill_ref, payer_msisdn, amount_kes, status FROM payments.c2b_confirmations WHERE trans_id = $1 FOR UPDATE;
+
+-- name: MarkC2BConflicting :exec
+UPDATE payments.c2b_confirmations SET conflicting = true, updated_at = sqlc.arg(at) WHERE id = sqlc.arg(id);
+
+-- name: GetC2B :one
+SELECT id, trans_id, shortcode, bill_ref, payer_msisdn, amount_kes, raw_confirmation, conflicting, status, status_requests,
+       status_requested_at, originator_conversation_id, status_result, outcome_reason, payment_id, unmatched_id, created_at, updated_at
+FROM payments.c2b_confirmations WHERE id = $1;
+
+-- name: LockC2B :one
+SELECT id, trans_id, shortcode, bill_ref, payer_msisdn, amount_kes, raw_confirmation, conflicting, status, status_requests,
+       status_requested_at, originator_conversation_id, status_result, outcome_reason, payment_id, unmatched_id, created_at, updated_at
+FROM payments.c2b_confirmations WHERE id = $1 FOR UPDATE;
+
+-- name: LockC2BForResult :one
+-- a status result names the request it answers; an answer to an earlier request is matched by its receipt instead
+SELECT id, status FROM payments.c2b_confirmations
+WHERE originator_conversation_id = sqlc.arg(originator) OR (sqlc.arg(receipt)::text <> '' AND trans_id = sqlc.arg(receipt)::text)
+ORDER BY (originator_conversation_id = sqlc.arg(originator)) DESC LIMIT 1 FOR UPDATE;
+
+-- name: MarkC2BStatusRequested :execrows
+UPDATE payments.c2b_confirmations
+   SET status = 'status_requested', status_requests = status_requests + 1, status_requested_at = sqlc.arg(at),
+       originator_conversation_id = sqlc.arg(originator), updated_at = sqlc.arg(at)
+ WHERE id = sqlc.arg(id) AND status IN ('received','status_requested');
+
+-- name: RecordC2BStatusResult :exec
+UPDATE payments.c2b_confirmations
+   SET status = 'status_received', status_result = sqlc.arg(result), updated_at = sqlc.arg(at)
+ WHERE id = sqlc.arg(id);
+
+-- name: SetC2BOutcome :exec
+UPDATE payments.c2b_confirmations
+   SET status = sqlc.arg(status), outcome_reason = sqlc.narg(reason), payment_id = sqlc.narg(payment_id),
+       unmatched_id = sqlc.narg(unmatched_id), updated_at = sqlc.arg(at)
+ WHERE id = sqlc.arg(id);
+
+-- name: RecheckC2B :execrows
+UPDATE payments.c2b_confirmations
+   SET status = 'received', status_result = NULL, originator_conversation_id = NULL, outcome_reason = NULL,
+       status_requests = 0, status_requested_at = NULL, updated_at = sqlc.arg(at)
+ WHERE trans_id = sqlc.arg(trans_id) AND status = 'unverified';
+
+-- Confirmations whose verification may have stalled: never asked about, asked without an answer for a while, or
+-- answered without being settled.
+-- name: StaleC2B :many
+SELECT id FROM payments.c2b_confirmations
+WHERE status IN ('received','status_requested','status_received') AND coalesce(status_requested_at, updated_at) < $1
+ORDER BY created_at LIMIT 100;
+
+-- name: InsertC2BPayment :one
+INSERT INTO payments.payments (user_id, channel, amount_requested_kes, msisdn, idempotency_key, created_at, updated_at)
+VALUES (sqlc.arg(user_id), 'c2b', sqlc.arg(amount_kes), sqlc.arg(msisdn), sqlc.arg(idempotency_key), sqlc.arg(at), sqlc.arg(at))
+RETURNING id;
+
+-- name: InsertUnmatched :one
+INSERT INTO payments.c2b_unmatched (mpesa_receipt, msisdn, account_ref, amount_kes, raw_payload, reason, created_at)
+VALUES (sqlc.arg(receipt), sqlc.narg(msisdn), sqlc.arg(account_ref), sqlc.arg(amount_kes), sqlc.arg(raw), sqlc.arg(reason), sqlc.arg(at))
+RETURNING id;
+
+-- name: LockUnmatchedByReceipt :one
+SELECT id, mpesa_receipt, account_ref, amount_kes, status, reason FROM payments.c2b_unmatched WHERE mpesa_receipt = $1 FOR UPDATE;
+
+-- name: ResolveUnmatched :exec
+UPDATE payments.c2b_unmatched
+   SET status = 'resolved', payment_id = sqlc.arg(payment_id), resolved_at = sqlc.arg(at), resolved_by = sqlc.arg(operator)
+ WHERE id = sqlc.arg(id) AND status = 'open';
+
+-- name: RefundUnmatched :exec
+UPDATE payments.c2b_unmatched
+   SET status = 'refunded', refund_ref = sqlc.arg(refund_ref), resolved_at = sqlc.arg(at), resolved_by = sqlc.arg(operator)
+ WHERE id = sqlc.arg(id) AND status = 'open';
+
+-- name: SuspenseOpenTotal :one
+SELECT coalesce(sum(amount_kes), 0)::bigint FROM payments.c2b_unmatched WHERE status = 'open';
+
+-- name: OpenSuspense :many
+SELECT mpesa_receipt FROM payments.c2b_unmatched WHERE status = 'open' ORDER BY created_at;
+
+-- name: OverdueC2B :many
+SELECT trans_id FROM payments.c2b_confirmations
+WHERE status IN ('received','status_requested','status_received') AND created_at < $1 ORDER BY created_at;
+
+-- name: UnverifiedC2B :many
+SELECT trans_id FROM payments.c2b_confirmations WHERE status = 'unverified' ORDER BY created_at;
+
+-- name: SuspenseWithoutJournal :many
+-- every suspense item has its parking journal, and a settled one its release or refund journal
+SELECT u.id::text FROM payments.c2b_unmatched u
+WHERE NOT EXISTS (SELECT 1 FROM ledger.ledger_journals j WHERE j.kind = 'c2b_suspense' AND j.reference_type = 'c2b_unmatched' AND j.reference_id = u.id)
+   OR (u.status <> 'open') <> EXISTS (SELECT 1 FROM ledger.ledger_journals j
+        WHERE j.kind IN ('c2b_suspense_release','c2b_suspense_refund') AND j.reference_type = 'c2b_unmatched' AND j.reference_id = u.id)
+ORDER BY 1;
+
+-- name: ReceiptCredited :one
+SELECT EXISTS (SELECT 1 FROM payments.payments WHERE mpesa_receipt = $1);
+
+-- name: ConflictsAfterCredit :many
+SELECT trans_id FROM payments.c2b_confirmations WHERE conflicting AND status = 'credited' ORDER BY created_at;

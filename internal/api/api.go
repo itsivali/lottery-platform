@@ -27,7 +27,7 @@ type Deps struct {
 	RG       *rg.Service
 	// Payments is nil when Daraja is not configured: the routes then answer 503.
 	Payments *payments.Service
-	// CallbackPath is the secret last segment of the STK callback URL.
+	// CallbackPath is the secret segment of the STK callback URL and of the paybill hook URLs.
 	CallbackPath string
 	Idem         *idempotency.Store
 	Limiter      *ratelimit.Limiter
@@ -51,6 +51,11 @@ func Mount(d Deps) func(chi.Router) {
 		// Daraja's callback: outside /v1 because it carries no token and no Idempotency-Key (it is authenticated by
 		// its secret path and deduplicated by the payments module).
 		r.Post("/hooks/mpesa/stk/{path}", h.stkCallback)
+		// Paybill hooks, under the same secret segment (C2B registration refuses URLs containing "mpesa").
+		r.Post("/hooks/c2b/{path}/validate", h.c2bValidate)
+		r.Post("/hooks/c2b/{path}/confirm", h.c2bConfirm)
+		r.Post("/hooks/c2b/{path}/status-result", h.c2bStatusResult)
+		r.Post("/hooks/c2b/{path}/status-timeout", h.c2bStatusTimeout)
 
 		r.Route("/v1", func(r chi.Router) {
 			r.Use(h.optionalAuth)

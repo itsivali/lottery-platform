@@ -1,6 +1,7 @@
 # Phase 2 — Payments: checkpoint
 
-Status: IN PROGRESS (started 2026-10-22 on the owner's go-ahead). Slices 1 (#26) and 2 (#27) merged.
+Status: IN PROGRESS (started 2026-10-22 on the owner's go-ahead). Slices 1 (#26), 2 (#27) and 4 (#13) merged;
+slice 3 (C2B) built against the mock, live sandbox run pending the initiator credentials.
 
 ## Plan (written before coding)
 
@@ -38,7 +39,9 @@ amount credits what was paid; a callback for a number that another account alrea
 
 ### Slice 3 — C2B
 Validation/confirmation URLs registered against the paybill; account reference → verified player; unmatched receipts
-go to `payments.c2b_unmatched` and the `SUSPENSE` account; back-office resolution later.
+go to `payments.c2b_unmatched` and the `SUSPENSE` account; back-office resolution later. Owner decisions
+(2026-10-22): sandbox shortcode 600982, account number = the registered phone, only a proved phone matches, confirmations
+verified with the Transaction Status API before crediting.
 
 ### Slice 4 — Reconciliation and reversals
 Reversal handling via `wallet.ReverseDeposit` (player debt suspends play and withdrawal), manual resolution of
@@ -116,3 +119,29 @@ Decisions in ADR 0007; operator guide in `docs/runbooks/payments-operations.md`.
   by the next top-up; refusals; resolve exactly once per receipt; reconciliation clean after normal traffic and
   catching a credit the ledger never saw), lotteryctl (parser; reconcile on a fresh database).
 
+
+### Slice 3 (C2B, paybill)
+Decisions in ADR 0008; operator guide in `docs/runbooks/payments-operations.md` (paybill section).
+
+- Daraja client: C2B URL registration (`ResponseType=Cancelled`), sandbox simulation (refused against production),
+  Transaction Status requests (receipt echoed in the occasion), and parsers for validation/confirmation bodies and
+  status results (whole-shilling amounts only, masked or hashed payer numbers ignored, single-object parameter lists).
+- Mock: URL registration that refuses Daraja's forbidden words, simulated payments with optional external validation,
+  asynchronous Transaction Status results, and one-shot faults (dropped/duplicated confirmations, masked phone, status
+  outage/silence/timeout/failure, different amount, payer or state).
+- Migration `00017`: `payments.c2b_confirmations` (one row per receipt, conflict flag, verification state, outcome),
+  suspense reason/resolution columns on `payments.c2b_unmatched`. Ledger postings `C2BSuspense`, `C2BSuspenseRelease`,
+  `C2BSuspenseRefund`. Identity `ProvedPhoneOwner`.
+- Service: validation (no writes), confirmation storage, verification job (`payments.c2b_verify`, swept when stalled),
+  settlement (credit through the STK credit path with channel `c2b` and no phone proof, suspense with a reason, or
+  unverified), operator actions `suspense-credit`, `suspense-refund`, `c2b-recheck`, plus `c2b-register` and
+  `c2b-simulate` in lotteryctl. Reconciliation: clearing = credited + open suspense, suspense account = open items,
+  every item journaled; attention lists for open suspense, unverified, overdue and conflicts after credit.
+- API: `/hooks/c2b/{secret}/validate|confirm|status-result|status-timeout` (404 unless C2B is configured and the
+  secret matches); OpenAPI updated. Config `DARAJA_C2B_SHORTCODE`, `DARAJA_INITIATOR_NAME`,
+  `DARAJA_SECURITY_CREDENTIAL` (all or none); Blueprint and compose updated.
+- Tests: client and mock unit tests; integration tests for credit net of excise, no phone proof, every suspense reason,
+  duplicate confirmations, forged confirmation, conflicting confirmations, Daraja's answer deciding (amount, payer,
+  masked payer, failure, reversed), silence → re-ask → unverified, outage retried, other shortcode, unknown result,
+  validation codes (and no writes), suspense credit/refund and their refusals, reconciliation of suspense.
+- Pending: a live sandbox run (needs the owner's initiator name and security credential), statement matching.
