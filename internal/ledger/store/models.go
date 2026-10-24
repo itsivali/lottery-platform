@@ -106,6 +106,13 @@ type GameOddsConfig struct {
 	PriceKes      int64
 }
 
+type GameReconciliationRun struct {
+	ID     string
+	RanAt  pgtype.Timestamptz
+	Ok     bool
+	Report []byte
+}
+
 type GameSeedChain struct {
 	ID           string
 	UserID       string

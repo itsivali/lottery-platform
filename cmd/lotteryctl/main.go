@@ -17,6 +17,7 @@ import (
 
 	"github.com/itsivali/lottery-platform/internal/app"
 	"github.com/itsivali/lottery-platform/internal/audit"
+	"github.com/itsivali/lottery-platform/internal/game"
 	"github.com/itsivali/lottery-platform/internal/identity"
 	"github.com/itsivali/lottery-platform/internal/kyc"
 	"github.com/itsivali/lottery-platform/internal/ledger"
@@ -41,13 +42,17 @@ const usage = `usage:
   lotteryctl payments c2b-register
   lotteryctl payments c2b-simulate -amount KES -msisdn 2547XXXXXXXX -account ACCOUNT
   lotteryctl kyc pending -operator NAME
-  lotteryctl kyc approve|reject -user ID -reason TEXT -operator NAME`
+  lotteryctl kyc approve|reject -user ID -reason TEXT -operator NAME
+  lotteryctl game reconcile
+  lotteryctl game simulate [-days N] [-slots N] [-lucky N] [-price KES]   (no database needed)`
 
 type command struct {
 	name                               string
 	receipt, reason, operator, payment string
 	user, refundRef, msisdn, account   string
 	amount                             int64
+	days, slots, lucky                 int
+	price                              int64
 }
 
 // flagsOf lists, per command, the flags it requires; every other flag must be absent.
@@ -62,6 +67,13 @@ var flagsOf = map[string][]string{
 	"kyc pending":              {"operator"},
 	"kyc approve":              {"user", "reason", "operator"},
 	"kyc reject":               {"user", "reason", "operator"},
+	"game reconcile":           nil,
+	"game simulate":            nil,
+}
+
+// optionalOf lists, per command, the flags it may take; the rest of a command's flags are as in flagsOf.
+var optionalOf = map[string][]string{
+	"game simulate": {"days", "slots", "lucky", "price"},
 }
 
 func parse(args []string) (command, error) {
@@ -85,6 +97,10 @@ func parse(args []string) (command, error) {
 	fs.StringVar(&c.msisdn, "msisdn", "", "payer number (sandbox)")
 	fs.StringVar(&c.account, "account", "", "account number typed by the payer")
 	fs.Int64Var(&c.amount, "amount", 0, "amount, whole KES")
+	fs.IntVar(&c.days, "days", 0, "simulated player-days per number of plays")
+	fs.IntVar(&c.slots, "slots", 0, "slot count")
+	fs.IntVar(&c.lucky, "lucky", 0, "lucky slots")
+	fs.Int64Var(&c.price, "price", 0, "price of a play, whole KES")
 	if err := fs.Parse(args[2:]); err != nil || fs.NArg() != 0 {
 		return command{}, bad
 	}
@@ -96,7 +112,10 @@ func parse(args []string) (command, error) {
 		}
 		delete(set, name)
 	}
-	if len(set) > 0 || c.amount < 0 {
+	for _, name := range optionalOf[c.name] {
+		delete(set, name)
+	}
+	if len(set) > 0 || c.amount < 0 || c.days < 0 || c.slots < 0 || c.lucky < 0 || c.price < 0 {
 		return command{}, bad
 	}
 	if c.operator != "" {
@@ -118,6 +137,9 @@ func main() {
 }
 
 func run(ctx context.Context, cmd command, out io.Writer) error {
+	if cmd.name == "game simulate" {
+		return simulate(cmd, out)
+	}
 	cfg, err := config.Load()
 	if err != nil {
 		return err
@@ -134,6 +156,8 @@ func run(ctx context.Context, cmd command, out io.Writer) error {
 		return paybill(ctx, cfg, cmd, out)
 	case "kyc pending", "kyc approve", "kyc reject":
 		return kycReview(ctx, cfg, cmd, out)
+	case "game reconcile":
+		return gameReconcile(ctx, cfg, out)
 	}
 
 	pool, err := db.Open(ctx, cfg.DatabaseURL)
@@ -256,4 +280,50 @@ func kycReview(ctx context.Context, cfg config.Config, cmd command, out io.Write
 	}
 	_, err = fmt.Fprintln(out, "user", cmd.user, "is now", st)
 	return err
+}
+
+// gameReconcile runs the game reconciliation (stakes, tickets, spins, seed chains); it needs only the database.
+func gameReconcile(ctx context.Context, cfg config.Config, out io.Writer) error {
+	pool, err := db.Open(ctx, cfg.DatabaseURL)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+	svc := game.NewService(pool, clock.Postgres{}, nil, nil, nil, nil, nil)
+	r, err := svc.Reconcile(ctx)
+	if err != nil {
+		return err
+	}
+	enc := json.NewEncoder(out)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(r); err != nil {
+		return err
+	}
+	if !r.OK {
+		return errors.New("game reconciliation found mismatches")
+	}
+	return nil
+}
+
+// simulate reports how often a day is lucky and what a draw chance costs under an odds version, from real fair spins.
+// Unset flags take the odds version in force (placeholders until the owner sets them).
+func simulate(cmd command, out io.Writer) error {
+	def := func(v, d int) int {
+		if v == 0 {
+			return d
+		}
+		return v
+	}
+	if cmd.price == 0 {
+		cmd.price = 100
+	}
+	cmd.days, cmd.slots, cmd.lucky = def(cmd.days, 100_000), def(cmd.slots, 12), def(cmd.lucky, 1)
+	rep, err := game.Simulate(game.SimConfig{Slots: cmd.slots, LuckySlots: cmd.lucky, PriceKES: cmd.price,
+		Tiers: map[int]int{1: 1, 2: 2, 3: 3, 4: 5}, Days: cmd.days})
+	if err != nil {
+		return err
+	}
+	enc := json.NewEncoder(out)
+	enc.SetIndent("", "  ")
+	return enc.Encode(rep)
 }
