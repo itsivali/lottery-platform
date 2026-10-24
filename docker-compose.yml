@@ -64,7 +64,6 @@ services:
       DARAJA_CONSUMER_SECRET: local
       DARAJA_SHORTCODE: "174379"
       DARAJA_PASSKEY: local
-      DARAJA_TILL_NUMBER: "5432101" # prompts pay a till (Buy Goods); remove to pay the paybill
       DARAJA_CALLBACK_TOKEN: local-dev-only-callback-token-000000
       DARAJA_C2B_SHORTCODE: "600992"
       DARAJA_INITIATOR_NAME: local

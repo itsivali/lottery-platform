@@ -2,8 +2,9 @@
 
 Read this first at the start of every session.
 
-- **Owner decision 2026-10-24 (ADR 0011): paybill (C2B) is shelved** until a paybill exists; top-ups can pay a **till
-  (STK Buy Goods)** with `DARAJA_TILL_NUMBER`.
+- **Owner decisions 2026-10-24 (ADR 0011):** paybill **C2B** (menu payments) is shelved until a paybill exists. Top-ups
+  are **STK prompts into the paybill** (174379 in the sandbox). Buy Goods (`DARAJA_TILL_NUMBER`) is built but off: the
+  sandbox refuses it (`Invalid TransactionType`), so it waits for a real till.
 - **Phase:** 1 — Foundations: complete. **Phase 2 — Payments: in progress** (`docs/checkpoints/phase-2.md`). Slices 1
   (Daraja client + mock), 2 (STK top-up, ADR 0006) and 4 (reversals, player debt, internal reconciliation, ADR 0007)
   are merged and live. **Slice 3 (C2B paybill, ADR 0008) is merged and live (2026-10-24, #18, #19)**; its sandbox
@@ -80,8 +81,7 @@ Read this first at the start of every session.
 1. **Test account re-created (2026-10-24):** 0796992457 signed up again, KYC approved by hand (owner-attested), and
    its first sandbox top-up (KES 10) was **credited and watched live over `GET /v1/payments/events`** (slice 5, #25,
    deployed), which proved the phone. Password in `~/.config/lottery-platform/test-account.env`.
-2. Buy Goods (ADR 0011) live in the sandbox; production needs a till with STK enabled (owner). Then close the phase 2
-   checkpoint (paybill run shelved).
+2. Close the phase 2 checkpoint (C2B shelved, Buy Goods off until a till exists). Then phase 3 (game and tickets).
 3. Owner: run trusted-proxy probe 2 from a second network; define the manual KYC review procedure and service level.
 4. Later: password reset (STK proof + ID match), passkeys/TOTP, real Play Integrity / App Attest verifiers.
 

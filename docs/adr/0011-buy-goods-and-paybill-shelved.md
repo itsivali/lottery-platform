@@ -1,6 +1,6 @@
 # 0011. Top-ups can pay a till (Buy Goods); paybill (C2B) is shelved
 
-Status: accepted
+Status: accepted (amended 2026-10-24: STK prompts stay on the paybill; Buy Goods is built but off)
 Date: 2026-10-24
 
 ## Context
@@ -25,3 +25,12 @@ chose STK Buy Goods into a till.
   (owner). A Pochi la Biashara has to be converted to a till for that.
 - Players can still only pay through the prompt we send; paying the till from the M-Pesa menu (without a prompt) is
   not detected (that would need C2B URLs on the till, the shelved path).
+
+## Amendment (2026-10-24, same day)
+Switched on in the sandbox with till 174379, the first Buy Goods prompt was refused by Daraja:
+`400.002.02 Bad Request - Invalid TransactionType`. The sandbox's Lipa na M-Pesa Online shortcode is a paybill and
+the sandbox offers no Buy Goods till, so Buy Goods cannot be tested before a real till exists. The owner decided to
+**tie top-ups to the paybill** (`CustomerPayBillOnline` into `DARAJA_SHORTCODE`, the path that credited the first
+live top-up). `DARAJA_TILL_NUMBER` stays unset; the Buy Goods code remains for when a till is available. "Paybill
+shelved" above refers to C2B (customers paying from the M-Pesa menu), not to STK prompts into the paybill.
+Daraja's rejection message is now kept in the error and logged when a push fails.

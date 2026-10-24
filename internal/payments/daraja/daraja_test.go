@@ -195,7 +195,7 @@ func TestSTKPush_RejectionsAndOutagesAreDistinguishedAndNeverLeakSecrets(t *test
 	}{
 		"rejected 400": {func(w http.ResponseWriter, _ map[string]any) {
 			w.WriteHeader(http.StatusBadRequest)
-			_, _ = w.Write([]byte(`{"requestId":"r","errorCode":"400.002.02","errorMessage":"Bad Request - Invalid PhoneNumber"}`))
+			_, _ = w.Write([]byte(`{"requestId":"r","errorCode":"400.002.02","errorMessage":"Bad Request - Invalid PhoneNumber 254712345678 passkey-secret"}`))
 		}, daraja.ErrRejected},
 		"non-zero response code": {func(w http.ResponseWriter, _ map[string]any) {
 			_, _ = w.Write([]byte(`{"MerchantRequestID":"m","CheckoutRequestID":"c","ResponseCode":"1","ResponseDescription":"no"}`))
@@ -219,6 +219,17 @@ func TestSTKPush_RejectionsAndOutagesAreDistinguishedAndNeverLeakSecrets(t *test
 				t.Errorf("%s: error %q leaks %q", name, err, secret)
 			}
 		}
+	}
+}
+
+func TestSTKPush_ARejectionSaysWhyInDarajasWords(t *testing.T) {
+	c, _ := newClient(t, &fakeDaraja{push: func(w http.ResponseWriter, _ map[string]any) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"requestId":"r","errorCode":"400.002.02","errorMessage":"Bad Request - Invalid TransactionType"}`))
+	}})
+	_, err := c.STKPush(context.Background(), daraja.STKPushRequest{MSISDN: "254712345678", AmountKES: 10, AccountRef: "A"})
+	if !errors.Is(err, daraja.ErrRejected) || !strings.Contains(err.Error(), `400.002.02 "Bad Request - Invalid TransactionType"`) {
+		t.Fatalf("err = %v", err)
 	}
 }
 

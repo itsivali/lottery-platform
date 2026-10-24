@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -285,6 +286,7 @@ func (s *Service) Push(ctx context.Context, paymentID string) error {
 			if errors.Is(pushErr, daraja.ErrRejected) || errors.Is(pushErr, daraja.ErrInvalidRequest) {
 				reason = "push_rejected"
 			}
+			slog.WarnContext(ctx, "stk push failed; the top-up fails", "payment", paymentID, "reason", reason, "err", pushErr)
 			return s.settle(ctx, tx, p.UserID, paymentID, "failed", reason, nil, now)
 		}
 		if _, err := q.MarkSTKSent(ctx, store.MarkSTKSentParams{MerchantRequestID: &res.MerchantRequestID, CheckoutRequestID: &res.CheckoutRequestID, At: now, ID: paymentID}); err != nil {
