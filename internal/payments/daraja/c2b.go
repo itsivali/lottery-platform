@@ -80,7 +80,7 @@ func (c *Client) RegisterC2BURLs(ctx context.Context, validationURL, confirmatio
 	if err != nil {
 		return err
 	}
-	return accepted(path, status, raw)
+	return c.accepted(path, status, raw)
 }
 
 // SimulateC2B makes the sandbox pay amount into the paybill from msisdn with the given account number, as a customer
@@ -100,7 +100,7 @@ func (c *Client) SimulateC2B(ctx context.Context, amount int64, msisdn, billRef 
 	if err != nil {
 		return err
 	}
-	return accepted(path, status, raw)
+	return c.accepted(path, status, raw)
 }
 
 func (c *Client) production() bool {
@@ -109,9 +109,9 @@ func (c *Client) production() bool {
 }
 
 // accepted checks the synchronous answer of an asynchronous Daraja request.
-func accepted(path string, status int, raw []byte) error {
+func (c *Client) accepted(path string, status int, raw []byte) error {
 	if status != http.StatusOK {
-		return classify(path, status, raw)
+		return c.classify(path, status, raw)
 	}
 	var out struct {
 		ResponseCode string `json:"ResponseCode"`
@@ -151,7 +151,7 @@ func (c *Client) TransactionStatus(ctx context.Context, receipt string) (StatusR
 	if err != nil {
 		return StatusRequest{}, err
 	}
-	if err := accepted(path, status, raw); err != nil {
+	if err := c.accepted(path, status, raw); err != nil {
 		return StatusRequest{}, err
 	}
 	var out struct {

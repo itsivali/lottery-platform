@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -223,17 +224,41 @@ func (c *Client) post(ctx context.Context, path, tok string, payload []byte) (in
 }
 
 // classify turns a non-2xx answer into an error: 4xx are rejections (Daraja understood and refused), the rest outages.
-func classify(path string, status int, raw []byte) error {
+func (c *Client) classify(path string, status int, raw []byte) error {
 	var e apiError
 	_ = json.Unmarshal(raw, &e)
 	code := e.ErrorCode
 	if code == "" {
 		code = "none"
 	}
+	msg := c.safeMessage(e.ErrorMessage)
 	if status >= 400 && status < 500 && status != http.StatusTooManyRequests {
-		return fmt.Errorf("%w: %s status %d code %s", ErrRejected, path, status, code)
+		return fmt.Errorf("%w: %s status %d code %s %q", ErrRejected, path, status, code, msg)
 	}
-	return fmt.Errorf("%w: %s status %d code %s", ErrUnavailable, path, status, code)
+	return fmt.Errorf("%w: %s status %d code %s %q", ErrUnavailable, path, status, code, msg)
+}
+
+// safeMessage keeps the words of Daraja's error message that say why (for example "Invalid TransactionType"). Daraja
+// may echo what it was sent, so any word with a digit (phone numbers, encoded credentials, shortcodes) and any
+// configured credential is dropped; the result is bounded and quoted by the caller so it cannot forge a log line.
+func (c *Client) safeMessage(m string) string {
+	secrets := []string{c.cfg.ConsumerKey, c.cfg.ConsumerSecret, c.cfg.Passkey}
+	if c.c2b != nil {
+		secrets = append(secrets, c.c2b.Initiator, c.c2b.SecurityCredential)
+	}
+	var kept []string
+	for _, w := range strings.Fields(m) {
+		if strings.ContainsAny(w, "0123456789") || slices.ContainsFunc(secrets, func(s string) bool { return s != "" && strings.Contains(w, s) }) {
+			kept = append(kept, "…")
+			continue
+		}
+		kept = append(kept, w)
+	}
+	out := strings.Join(kept, " ")
+	if len(out) > 120 {
+		out = out[:120]
+	}
+	return out
 }
 
 func (c *Client) password(ts string) string {
@@ -279,7 +304,7 @@ func (c *Client) STKPush(ctx context.Context, r STKPushRequest) (STKPushResult, 
 		return STKPushResult{}, err
 	}
 	if status != http.StatusOK {
-		return STKPushResult{}, classify(path, status, raw)
+		return STKPushResult{}, c.classify(path, status, raw)
 	}
 	var out struct {
 		MerchantRequestID string `json:"MerchantRequestID"`
@@ -335,7 +360,7 @@ func (c *Client) STKQuery(ctx context.Context, checkoutRequestID string) (STKSta
 		if json.Unmarshal(raw, &e) == nil && e.ErrorCode == processingErr {
 			return STKStatus{State: Pending}, nil
 		}
-		return STKStatus{}, classify(path, status, raw)
+		return STKStatus{}, c.classify(path, status, raw)
 	}
 	var out struct {
 		ResultCode json.RawMessage `json:"ResultCode"`

@@ -216,6 +216,9 @@ func TestTransactionStatus_ErrorsCarryNoSecrets(t *testing.T) {
 	if strings.Contains(err.Error(), "c2VjcmV0") || strings.Contains(err.Error(), "testapi") {
 		t.Fatalf("error leaks a secret: %v", err)
 	}
+	if !strings.Contains(err.Error(), "Invalid Initiator") {
+		t.Fatalf("error lost Daraja's reason: %v", err)
+	}
 }
 
 const confirmation = `{"TransactionType":"Pay Bill","TransID":"TJK1AB2CD3","TransTime":"20261024093112","TransAmount":"150.00",

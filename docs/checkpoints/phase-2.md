@@ -167,5 +167,6 @@ Decisions in ADR 0010.
 
 ### Buy Goods (ADR 0011)
 - `DARAJA_TILL_NUMBER` switches the prompt to `CustomerBuyGoodsOnline` into that till (store number signs); the
-  settlement path is unchanged. Client, config and mock tests; compose now prompts into a till so `make e2e` covers it.
+  settlement path is unchanged. Client, config and mock tests. Off everywhere since the sandbox refused it (ADR 0011
+  amendment): top-ups are STK prompts into the paybill.
 - Paybill (slice 3) shelved by the owner until a paybill exists.
