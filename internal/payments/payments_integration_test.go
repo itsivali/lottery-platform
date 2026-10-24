@@ -698,9 +698,27 @@ func TestVerify_SettlesWhatItCannotConfirmOnceThePaymentExpires(t *testing.T) {
 	}
 }
 
-func TestVerify_AQueryOutageIsRetriedWithBackoff(t *testing.T) {
+func TestVerify_DoesNotAskBeforeTheCustomerCouldHaveAnsweredUnlessACallbackCame(t *testing.T) {
+	e := setup(t)
+	_, tu := e.startPushed(t, darajamock.Fault{QueryStatus: http.StatusTooManyRequests})
+	e.clk.Advance(30 * time.Second)
+	if d, err := e.svc.Verify(context.Background(), tu.ID); err != nil || d != payments.DefaultVerifyAfter-30*time.Second {
+		t.Fatalf("early verify: wait %v err %v", d, err)
+	}
+	e.clk.Advance(payments.DefaultVerifyAfter)
+	if d, err := e.svc.Verify(context.Background(), tu.ID); err != nil || d != payments.DefaultVerifyAfter {
+		t.Fatalf("throttled: wait %v err %v, want to ask again after the usual interval", d, err)
+	}
+}
+
+func TestVerify_AQueryOutageIsAskedAgainThenRetriedWithBackoffAfterExpiry(t *testing.T) {
 	e := setup(t)
 	_, tu := e.startPushed(t, darajamock.Fault{QueryStatus: http.StatusServiceUnavailable})
+	e.clk.Advance(payments.DefaultVerifyAfter)
+	if d, err := e.svc.Verify(context.Background(), tu.ID); err != nil || d != payments.DefaultVerifyAfter {
+		t.Fatalf("outage before expiry: wait %v err %v", d, err)
+	}
+	e.clk.Advance(payments.DefaultExpiry)
 	if _, err := e.svc.Verify(context.Background(), tu.ID); !errors.Is(err, daraja.ErrUnavailable) {
 		t.Fatalf("err = %v, want an outage for the job to retry", err)
 	}

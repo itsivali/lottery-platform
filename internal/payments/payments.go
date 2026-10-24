@@ -328,6 +328,11 @@ func (s *Service) HandleCallback(ctx context.Context, raw []byte) error {
 
 // Verify settles a payment from Daraja's status query. It returns a positive duration when the outcome is not known
 // yet and the job should run again after it; an error is an outage to retry with backoff.
+//
+// Without a callback it does not ask before VerifyAfter has passed since the payment started: the customer cannot have
+// answered the prompt yet, and Daraja throttles early queries (HTTP 429, seen live 2026-10-24). A query that finds
+// Daraja throttling or unavailable is asked again after VerifyAfter until the payment expires; after that the outage
+// is returned so the job keeps retrying with backoff.
 func (s *Service) Verify(ctx context.Context, paymentID string) (time.Duration, error) {
 	p, err := store.New(s.pool).GetPayment(ctx, paymentID)
 	if err != nil {
@@ -344,6 +349,15 @@ func (s *Service) Verify(ctx context.Context, paymentID string) (time.Duration, 
 	if s.daraja == nil { // configuration removed while payments were in flight: retry until it is back
 		return 0, ErrUnavailable
 	}
+	if age := now.Sub(p.CreatedAt); age < s.cfg.VerifyAfter {
+		heard, err := s.calledBack(ctx, p.RawCallback, p.CheckoutRequestID)
+		if err != nil {
+			return 0, err
+		}
+		if !heard {
+			return s.cfg.VerifyAfter - age, nil
+		}
+	}
 	if p.CheckoutRequestID == nil { // the push never recorded an acceptance
 		if !expired {
 			return s.cfg.VerifyAfter, nil
@@ -357,6 +371,9 @@ func (s *Service) Verify(ctx context.Context, paymentID string) (time.Duration, 
 			return s.cfg.VerifyAfter, nil
 		}
 		return 0, s.settleTx(ctx, paymentID, "unconfirmed", "query_rejected", nil)
+	case err != nil && !expired:
+		slog.WarnContext(ctx, "stk status query failed; asking again later", "payment", paymentID, "err", err, "in", s.cfg.VerifyAfter)
+		return s.cfg.VerifyAfter, nil
 	case err != nil:
 		return 0, err
 	}
@@ -375,6 +392,22 @@ func (s *Service) Verify(ctx context.Context, paymentID string) (time.Duration, 
 		return 0, s.settleTx(ctx, paymentID, status, "", &code)
 	}
 	return s.credit(ctx, paymentID, expired)
+}
+
+// calledBack reports whether Daraja has sent a callback for the payment, including one kept as an orphan because it
+// arrived before the push job recorded the checkout id.
+func (s *Service) calledBack(ctx context.Context, raw []byte, checkoutID *string) (bool, error) {
+	if raw != nil {
+		return true, nil
+	}
+	if checkoutID == nil {
+		return false, nil
+	}
+	_, err := store.New(s.pool).OrphanCallback(ctx, *checkoutID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	return err == nil, err
 }
 
 // credit runs after the status query said the customer paid. The amount and receipt come from the stored callback;
