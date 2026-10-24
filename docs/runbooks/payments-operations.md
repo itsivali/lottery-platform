@@ -65,6 +65,10 @@ go run ./cmd/lotteryctl payments c2b-register
 ```
 
 The sandbox accepts repeated registrations. In production a shortcode registers once; changing URLs needs Safaricom.
+A successful registration answers `ResponseCode "00000000"` (not `"0"`); the sandbox paybill is 600992, the Party A
+on the app's Test Credentials page. As of 2026-10-24 the sandbox accepted registrations, simulations and status
+requests but did not call the hooks back; if confirmations never arrive, check the hooks from outside first (a `{}`
+POST to `/hooks/c2b/<secret>/validate` must answer `C2B00016`) before suspecting the app.
 
 ### Credit a suspense item to the right player
 
