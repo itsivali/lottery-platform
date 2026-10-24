@@ -105,6 +105,27 @@ func TestSTKPush_SendsASignedPaybillRequestAndReturnsTheCheckoutID(t *testing.T)
 	}
 }
 
+func TestSTKPush_WithATillNumberSendsABuyGoodsRequestSignedByTheStoreNumber(t *testing.T) {
+	var got map[string]any
+	f := &fakeDaraja{push: func(w http.ResponseWriter, b map[string]any) { got = b; accepted(w, b) }}
+	srv := httptest.NewServer(f.handler(t))
+	t.Cleanup(srv.Close)
+	cfg := testConfig(srv.URL)
+	cfg.TillNumber = "5432101"
+	c, err := daraja.New(cfg, srv.Client(), clock.NewManual(at))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.STKPush(context.Background(), daraja.STKPushRequest{MSISDN: "254712345678", AmountKES: 150, AccountRef: "TOPUP", Description: "Wallet top-up"}); err != nil {
+		t.Fatal(err)
+	}
+	wantPassword := base64.StdEncoding.EncodeToString([]byte("174379" + "passkey-secret" + "20261022093005"))
+	if got["TransactionType"] != "CustomerBuyGoodsOnline" || got["PartyB"] != "5432101" ||
+		got["BusinessShortCode"] != "174379" || got["Password"] != wantPassword {
+		t.Fatalf("request = %v", got)
+	}
+}
+
 func TestSTKPush_RefusesBadInputWithoutCallingDaraja(t *testing.T) {
 	f := &fakeDaraja{push: func(http.ResponseWriter, map[string]any) { t.Error("daraja was called") }}
 	c, _ := newClient(t, f)
@@ -269,6 +290,8 @@ func TestNew_RefusesIncompleteOrProductionConfig(t *testing.T) {
 		"relative base":   func(c *daraja.Config) { c.BaseURL = "sandbox.safaricom.co.ke" },
 		"bad base":        func(c *daraja.Config) { c.BaseURL = "::" },
 		"production base": func(c *daraja.Config) { c.BaseURL = "https://api.safaricom.co.ke" },
+		"phone as till":   func(c *daraja.Config) { c.TillNumber = "0796992457" },
+		"letters in till": func(c *daraja.Config) { c.TillNumber = "54321A" },
 	} {
 		c := ok
 		mut(&c)

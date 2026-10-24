@@ -50,16 +50,22 @@ const (
 	stillProcessing int32 = 4999
 )
 
-var msisdnRE = regexp.MustCompile(`^254[17][0-9]{8}$`)
+var (
+	msisdnRE = regexp.MustCompile(`^254[17][0-9]{8}$`)
+	tillRE   = regexp.MustCompile(`^[0-9]{5,8}$`)
+)
 
 // Config is the Daraja app and paybill configuration.
 type Config struct {
 	BaseURL        string // https://sandbox.safaricom.co.ke, or a local mock
 	ConsumerKey    string
 	ConsumerSecret string
-	ShortCode      string // paybill (Lipa na M-Pesa Online shortcode)
+	ShortCode      string // Lipa na M-Pesa Online shortcode: the paybill, or the store (head office) number of a till
 	Passkey        string
-	CallbackURL    string // where Daraja posts STK results; Safaricom only calls https
+	// TillNumber, when set, makes the prompt a Buy Goods payment (CustomerBuyGoodsOnline) into this till; the store
+	// number in ShortCode still signs the request. Empty means a paybill payment into ShortCode.
+	TillNumber  string
+	CallbackURL string // where Daraja posts STK results; Safaricom only calls https
 	// AllowProduction must be set to talk to api.safaricom.co.ke. Without it a production base URL is refused, so
 	// production credentials cannot be used by accident.
 	AllowProduction bool
@@ -73,6 +79,9 @@ func (c Config) validate() error {
 		if v == "" {
 			return fmt.Errorf("daraja: %s is required", name)
 		}
+	}
+	if c.TillNumber != "" && !tillRE.MatchString(c.TillNumber) {
+		return errors.New("daraja: till number must be 5 to 8 digits")
 	}
 	base, err := url.Parse(c.BaseURL)
 	if err != nil || (base.Scheme != "https" && base.Scheme != "http") || base.Host == "" {
@@ -256,9 +265,13 @@ func (c *Client) STKPush(ctx context.Context, r STKPushRequest) (STKPushResult, 
 		return STKPushResult{}, err
 	}
 	const path = "/mpesa/stkpush/v1/processrequest"
+	kind, partyB := "CustomerPayBillOnline", c.cfg.ShortCode
+	if c.cfg.TillNumber != "" {
+		kind, partyB = "CustomerBuyGoodsOnline", c.cfg.TillNumber
+	}
 	status, raw, err := c.call(ctx, path, map[string]any{
 		"BusinessShortCode": c.cfg.ShortCode, "Password": c.password(ts), "Timestamp": ts,
-		"TransactionType": "CustomerPayBillOnline", "Amount": r.AmountKES, "PartyA": r.MSISDN, "PartyB": c.cfg.ShortCode,
+		"TransactionType": kind, "Amount": r.AmountKES, "PartyA": r.MSISDN, "PartyB": partyB,
 		"PhoneNumber": r.MSISDN, "CallBackURL": c.cfg.CallbackURL, "AccountReference": r.AccountRef,
 		"TransactionDesc": r.Description,
 	})

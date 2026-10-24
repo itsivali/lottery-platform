@@ -36,6 +36,18 @@ func fullC2BEnv(t *testing.T) {
 	t.Setenv("DARAJA_SECURITY_CREDENTIAL", "bG9jYWwtZGV2LW9ubHk=")
 }
 
+func TestPayments_BuyGoodsIsOnlyUsedWithATillNumber(t *testing.T) {
+	fullPaymentsEnv(t)
+	t.Setenv("DARAJA_TILL_NUMBER", "")
+	if cfg, err := config.Load(); err != nil || cfg.Payments.TillNumber != "" {
+		t.Fatalf("till=%q err=%v", cfg.Payments.TillNumber, err)
+	}
+	t.Setenv("DARAJA_TILL_NUMBER", "5432101")
+	if cfg, err := config.Load(); err != nil || cfg.Payments.TillNumber != "5432101" {
+		t.Fatalf("till=%q err=%v", cfg.Payments.TillNumber, err)
+	}
+}
+
 func TestPayments_C2BIsOffUnlessConfigured(t *testing.T) {
 	fullPaymentsEnv(t)
 	cfg, err := config.Load()

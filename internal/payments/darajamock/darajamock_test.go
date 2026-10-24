@@ -51,7 +51,9 @@ type env struct {
 	cbs    *callbacks
 }
 
-func setup(t *testing.T) env {
+func setup(t *testing.T) env { return setupTill(t, "") }
+
+func setupTill(t *testing.T, till string) env {
 	t.Helper()
 	cbs := &callbacks{}
 	cbSrv := httptest.NewServer(cbs.handler(t))
@@ -60,7 +62,7 @@ func setup(t *testing.T) env {
 	srv := httptest.NewServer(m)
 	t.Cleanup(srv.Close)
 	c, err := daraja.New(daraja.Config{BaseURL: srv.URL, ConsumerKey: "ck", ConsumerSecret: "cs", ShortCode: "174379",
-		Passkey: "pk", CallbackURL: cbSrv.URL + "/cb"}, srv.Client(), clock.NewManual(time.Date(2026, 10, 22, 6, 0, 0, 0, time.UTC)))
+		Passkey: "pk", TillNumber: till, CallbackURL: cbSrv.URL + "/cb"}, srv.Client(), clock.NewManual(time.Date(2026, 10, 22, 6, 0, 0, 0, time.UTC)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -98,6 +100,25 @@ func TestMock_AHappyPushIsPendingUntilCompletedThenCallsBackAndQueriesAsPaid(t *
 	}
 	if p := e.mock.Pushes(); len(p) != 1 || p[0].AmountKES != 150 || p[0].MSISDN != "254712345678" {
 		t.Fatalf("pushes = %+v", p)
+	}
+}
+
+func TestMock_RecordsWhetherAPushPaysThePaybillOrATill(t *testing.T) {
+	paybill := setup(t)
+	push(t, paybill, 50)
+	if p := paybill.mock.Pushes(); p[0].TransactionType != "CustomerPayBillOnline" || p[0].PartyB != "174379" {
+		t.Fatalf("paybill push = %+v", p[0])
+	}
+	till := setupTill(t, "5432101")
+	res := push(t, till, 50)
+	if p := till.mock.Pushes(); p[0].TransactionType != "CustomerBuyGoodsOnline" || p[0].PartyB != "5432101" {
+		t.Fatalf("buy goods push = %+v", p[0])
+	}
+	if err := till.mock.Complete(context.Background(), res.CheckoutRequestID); err != nil {
+		t.Fatal(err)
+	}
+	if got := till.cbs.got(); len(got) != 1 || !got[0].Paid() || got[0].AmountKES != 50 {
+		t.Fatalf("callbacks = %+v", got)
 	}
 }
 

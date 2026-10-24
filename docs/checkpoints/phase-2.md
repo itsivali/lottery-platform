@@ -1,8 +1,8 @@
 # Phase 2 — Payments: checkpoint
 
 Status: IN PROGRESS (started 2026-10-22 on the owner's go-ahead). Slices 1 (#26), 2 (#27), 4 (#13) and 3 (#18, #19)
-merged and live; slice 5 (realtime, ADR 0010) built. Before the checkpoint closes: the paybill sandbox run (Daraja has
-not called back yet) and a first sandbox top-up from the owner's re-created test account.
+merged and live; slice 5 (realtime, ADR 0010) built. The first sandbox top-up from the owner's re-created test
+account was credited and watched over the stream (2026-10-24). Paybill shelved, Buy Goods added (ADR 0011).
 
 ## Plan (written before coding)
 
@@ -164,3 +164,8 @@ Decisions in ADR 0010.
   not announced, 401 without a token, `expired` after logout, 4th stream refused then freed, streams end and new ones
   get 503 at shutdown).
 - Not done here: the compose e2e journey does not open a stream yet (it still polls).
+
+### Buy Goods (ADR 0011)
+- `DARAJA_TILL_NUMBER` switches the prompt to `CustomerBuyGoodsOnline` into that till (store number signs); the
+  settlement path is unchanged. Client, config and mock tests; compose now prompts into a till so `make e2e` covers it.
+- Paybill (slice 3) shelved by the owner until a paybill exists.
