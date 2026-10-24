@@ -27,3 +27,12 @@ SELECT kyc_status FROM identity.users WHERE id = $1;
 -- name: GetKYCCheck :one
 SELECT id, user_id, status, id_number_enc, id_number_hash, full_name_enc, date_of_birth_enc, provider, supersedes_id
 FROM kyc.kyc_checks WHERE id = $1;
+
+-- Accounts waiting for a staff decision, with their latest submission, oldest first.
+-- name: AwaitingReview :many
+SELECT u.id AS user_id, u.msisdn, c.id_number_enc, c.full_name_enc, c.date_of_birth_enc, c.created_at
+FROM identity.users u
+JOIN LATERAL (SELECT k.id_number_enc, k.full_name_enc, k.date_of_birth_enc, k.created_at FROM kyc.kyc_checks k
+              WHERE k.user_id = u.id ORDER BY k.created_at DESC, k.id DESC LIMIT 1) c ON true
+WHERE u.kyc_status = 'manual_review'
+ORDER BY c.created_at, u.id;

@@ -35,7 +35,8 @@ Read this first at the start of every session.
 - Phone ownership is proved by the **M-Pesa STK Push confirmation at the first top-up** (Phase 2 calls
   `identity.Service.MarkPhoneVerified`). The proof is the push target (the phone that approved the prompt); the
   callback's payer number is only cross-checked when present, because Safaricom may mask it.
-- KYC runs as a River job. The registry vendor is **not chosen**; Google/Apple developer accounts do not exist yet; both fail closed.
+- **KYC is reviewed by hand (owner, 2026-10-24, ADR 0009):** no registry provider; submissions wait in `manual_review`
+  for `lotteryctl kyc approve|reject` (back office later). Google/Apple sign-in ids come with the web app; SSO is off.
 - Free-tier deployment: migrate on start (advisory lock), workers in-process, free Postgres + Key Value.
 - **Deposit excise (owner, 2026-10-22): deducted from the deposit** (the wallet shows the deposit and a separate excise
   line). Rate version to load: `deposit_excise` 5% `half_up` effective 2025-07-01 (owner's choice, based on the Finance
@@ -73,18 +74,18 @@ Read this first at the start of every session.
 
 ## Next steps
 
-1. Phase 2 without a paybill: slice 4 (reversals, player debt, internal reconciliation; ADR 0007) is done; next
-   realtime confirmation (slice 5). Sandbox top-ups are live (2026-10-22): the Daraja sandbox credentials are set on Render and the api
-   logs `payments=true`. The owner's test account (0796992457) is KYC-verified with provider
-   `owner-attested-2026-10-22` (no registry vendor yet); its phone is proved by its first approved top-up prompt.
-2. Owner: run trusted-proxy probe 2 from a second network.
-3. Owner: choose the national-registry (IPRS) provider.
-4. Later: password reset (STK proof + ID match), passkeys/TOTP, real Play Integrity / App Attest verifiers, nightly
-   mutation testing of the integration-backed packages.
+1. **Recreate `lottery-api`** from the Blueprint (the owner deleted the service on 2026-10-24 to fix auto-deploy; the
+   database and Key Value survived). Then set the Daraja and paybill values again, update the service id and URL in
+   `db-rotate.yml`, `deploy-prod.yml` and the `RENDER_API_SERVICE_IDS` secret, and register the paybill URLs again.
+   The generated keys are new, so the test account (0796992457) signs up again and goes through manual KYC review.
+2. Phase 2 slice 5: realtime confirmation of top-ups.
+3. Owner: run trusted-proxy probe 2 from a second network; define the manual KYC review procedure and service level.
+4. Later: password reset (STK proof + ID match), passkeys/TOTP, real Play Integrity / App Attest verifiers.
 
 ## Open questions for the owner
 
 - Confirm the 5% deposit excise version with a tax adviser before production.
-- Does GRA accept phone verification by M-Pesa confirmation instead of SMS OTP? (ADR 0005)
+- Does GRA accept phone verification by M-Pesa confirmation instead of SMS OTP (ADR 0005), and manual identity checks
+  instead of a registry lookup (ADR 0009)?
 - Minimum verification deposit amount (suggested KES 10) and excise treatment on it.
 - `internal/notifications` (SMS sender) is unused since ADR 0005: keep for a future channel or delete?

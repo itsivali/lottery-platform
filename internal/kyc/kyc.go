@@ -159,7 +159,12 @@ func (s *Service) Submit(ctx context.Context, userID string, in Submission) (Sta
 	if err != nil {
 		return "", err
 	}
+	_, manual := s.prov.(ManualProvider)
 	rec.hash, rec.adult, rec.provider, rec.status = hash, true, s.prov.Name(), "pending"
+	outcome := Pending
+	if manual { // no registry: the submission waits for a staff decision, no job
+		rec.status, outcome = "manual_review", ManualReview
+	}
 
 	err = pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
 		q := store.New(tx)
@@ -177,15 +182,62 @@ func (s *Service) Submit(ctx context.Context, userID string, in Submission) (Sta
 		if err != nil {
 			return err
 		}
-		if err := q.SetUserKYC(ctx, store.SetUserKYCParams{KycStatus: string(Pending), At: now, ID: userID}); err != nil {
+		if err := q.SetUserKYC(ctx, store.SetUserKYCParams{KycStatus: string(outcome), At: now, ID: userID}); err != nil {
 			return err
+		}
+		if manual {
+			return nil
 		}
 		return s.enq.EnqueueVerify(ctx, tx, id, userID)
 	})
 	if err != nil {
 		return "", err
 	}
-	return Pending, nil
+	return outcome, nil
+}
+
+// PendingReview is a submission waiting for a staff decision, decrypted for the reviewer.
+type PendingReview struct {
+	UserID, MSISDN                  string
+	IDNumber, FullName, DateOfBirth string
+	SubmittedAt                     time.Time
+}
+
+// AwaitingReview returns the submissions waiting for a staff decision, oldest first, with the personal details
+// decrypted. Every submission shown is audited as unmasked by reviewer, who must be named.
+func (s *Service) AwaitingReview(ctx context.Context, reviewer string) ([]PendingReview, error) {
+	if strings.TrimSpace(reviewer) == "" {
+		return nil, errors.New("kyc: a named reviewer is required")
+	}
+	var out []PendingReview
+	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		rows, err := store.New(tx).AwaitingReview(ctx)
+		if err != nil {
+			return err
+		}
+		for _, r := range rows {
+			id, err := s.kr.Decrypt(r.IDNumberEnc, []byte("kyc.id_number"))
+			if err != nil {
+				return err
+			}
+			nm, err := s.kr.Decrypt(r.FullNameEnc, []byte("kyc.full_name"))
+			if err != nil {
+				return err
+			}
+			dob, err := s.kr.Decrypt(r.DateOfBirthEnc, []byte("kyc.dob"))
+			if err != nil {
+				return err
+			}
+			out = append(out, PendingReview{UserID: r.UserID, MSISDN: r.Msisdn, IDNumber: string(id), FullName: string(nm),
+				DateOfBirth: string(dob), SubmittedAt: r.CreatedAt})
+			if err := s.audit.Record(ctx, tx, audit.Event{ActorType: audit.Staff, ActorID: reviewer, Action: "kyc.unmask",
+				EntityType: "user", EntityID: r.UserID, Details: map[string]any{"purpose": "manual review"}}); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	return out, err
 }
 
 // pendingCheck loads a check and reports whether it is still the live pending submission of its user.

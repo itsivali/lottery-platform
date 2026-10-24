@@ -56,13 +56,9 @@ services:
       - key: IDENTITY_KEY
         generateValue: true
 
-      # National-registry gateway and sign-in client ids: set in the dashboard once chosen. Unset means the feature
-      # fails closed (no registry checks, no SSO) rather than pretending to work. There is no SMS gateway: phone
-      # ownership is proved by the first M-Pesa top-up.
-      - key: KYC_API_URL
-        sync: false
-      - key: KYC_API_KEY
-        sync: false
+      # Identities are reviewed by staff, with no paid registry (owner decision 2026-10-24, ADR 0009), so there is no
+      # KYC gateway to configure. Sign-in client ids are set in the dashboard when the web app arrives; unset means SSO
+      # is off. There is no SMS gateway: phone ownership is proved by the first M-Pesa top-up.
       - key: GOOGLE_CLIENT_ID
         sync: false
       - key: APPLE_CLIENT_ID
