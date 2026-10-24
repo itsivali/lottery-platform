@@ -87,6 +87,7 @@ type DrawsPrizeStructure struct {
 	Prizes        []byte
 	CreatedBy     string
 	CreatedAt     time.Time
+	PoolShare     pgtype.Numeric
 }
 
 type GameChanceTier struct {

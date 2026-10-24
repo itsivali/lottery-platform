@@ -407,6 +407,22 @@ func (q *Queries) PlaysOn(ctx context.Context, arg PlaysOnParams) ([]string, err
 	return items, nil
 }
 
+const poolFundingTotal = `-- name: PoolFundingTotal :one
+SELECT coalesce(sum(e.amount_kes), 0)::bigint
+FROM ledger.ledger_entries e
+JOIN ledger.ledger_journals j ON j.id = e.journal_id
+JOIN ledger.ledger_accounts a ON a.id = e.account_id
+WHERE j.kind = 'prize_pool_funding' AND a.code = 'STAKES_REVENUE' AND e.direction = 'D'
+`
+
+// what approved draws moved from STAKES_REVENUE into the prize pools (phase 4)
+func (q *Queries) PoolFundingTotal(ctx context.Context) (int64, error) {
+	row := q.db.QueryRow(ctx, poolFundingTotal)
+	var column_1 int64
+	err := row.Scan(&column_1)
+	return column_1, err
+}
+
 const recordPlay = `-- name: RecordPlay :exec
 UPDATE tickets.player_days
    SET paid_plays = paid_plays + 1, lucky = lucky OR $1, updated_at = $2

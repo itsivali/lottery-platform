@@ -63,3 +63,22 @@ a public draw verifier in `tools/verifier`, reconciliation of pools, monitoring 
   a wrong key, bad hex; a lying relay is skipped for an honest one; outages and not-yet-published rounds. 93.4%.
 - Verification uses kyber's `sign/bdn` scheme on G1 (its single-signature check is plain BLS; the older `sign/bls`
   package is deprecated for a rogue-key weakness that only concerns aggregation).
+
+### Slice 2 (draw lifecycle)
+- Migration `00021`: prize structures as a share of stakes (placeholders: daily 30%, weekly 10%, monthly 5%,
+  quarterly 5%; ranks 50/30/20%, rounded down); sign-offs one row per official (append-only); what each state must carry
+  (CHECK); a trigger that allows only forward transitions and refuses changing a fixed draw; the certificate stored as
+  `json` so it is published byte for byte as hashed (`jsonb` reorders keys: caught by the test that rehashes it).
+- `internal/draws`: `Schedule` (every 5 minutes in the worker: open the current periods, freeze at 00:05, void and
+  re-run draws not signed before their round, conduct signed draws once their round is out), `Freeze` (entries per
+  chance, entry-list hash, encrypted company seed and its commitment, round = first at or after 09:00, or the next
+  09:00 at least an hour away), `Sign`/`Approve` (two different officials; signing closes when the round is
+  published), `Void` (frozen or signed, before the round; re-runs with a new seed and round), `Conduct` (verified
+  beacon fetched outside the transaction; one prize per player; certificate with everything needed to recompute),
+  approval posts `ledger.PrizePoolFunding`; the game reconciliation now counts pool funding.
+- `lotteryctl draws list | show | sign | approve | void`; runbook `docs/runbooks/draws.md`.
+- Tests: periods, freeze time, uniform picks; the full journey (entries 2 + 10 + 1 from tiers and a lucky day, hash
+  recomputed, two signatures, nothing drawn before 09:00, winners recomputed from the certificate, pool 210 of 700
+  funded at approval); unsigned → voided and re-run with the next 09:00 round; official void before but not after the
+  round; one prize per player; empty day voided; drand down → waits; the database refuses skipped and backward
+  transitions, changes to a fixed draw and deleted entries. Coverage 86%.

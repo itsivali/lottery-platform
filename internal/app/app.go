@@ -21,6 +21,8 @@ import (
 
 	"github.com/itsivali/lottery-platform/internal/api"
 	"github.com/itsivali/lottery-platform/internal/audit"
+	"github.com/itsivali/lottery-platform/internal/draws"
+	"github.com/itsivali/lottery-platform/internal/draws/drand"
 	"github.com/itsivali/lottery-platform/internal/game"
 	"github.com/itsivali/lottery-platform/internal/identity"
 	"github.com/itsivali/lottery-platform/internal/kyc"
@@ -53,6 +55,7 @@ type App struct {
 	kyc      *kyc.Service
 	payments *payments.Service
 	game     *game.Service
+	draws    *draws.Service
 	live     *payments.Live
 	stopLive context.CancelFunc
 	workers  *river.Client[pgx.Tx]
@@ -119,6 +122,9 @@ func New(ctx context.Context, cfg config.Config, pool *pgxpool.Pool) (*App, erro
 
 	a.game = game.NewService(pool, clk, idSvc, rgSvc, wallet.NewService(ls), keyring, wallet.ErrInsufficientFunds)
 
+	// Draws use the League of Entropy's quicknet, verified against the pinned key, through its public relays.
+	a.draws = draws.NewService(pool, clk, keyring, drand.New(drand.Quicknet, drand.DefaultRelays, hc), ls)
+
 	// One connection per instance listens for payment changes and fans them out to the players' streams.
 	listenCfg := pool.Config().ConnConfig.Copy()
 	a.live = payments.NewLive(func(ctx context.Context) (*pgx.Conn, error) { return pgx.ConnectConfig(ctx, listenCfg) }, payments.LiveConfig{})
@@ -162,8 +168,9 @@ func (a *App) StartWorkers(ctx context.Context) error {
 	kyc.AddWorkers(workers, a.kyc)
 	payments.AddWorkers(workers, a.payments)
 	game.AddWorkers(workers, a.game)
+	draws.AddWorkers(workers, a.draws)
 	wc, err := river.NewClient(riverpgxv5.New(a.pool), &river.Config{
-		Schema: db.RiverSchema, Workers: workers, PeriodicJobs: append(payments.PeriodicJobs(), game.PeriodicJobs()...),
+		Schema: db.RiverSchema, Workers: workers, PeriodicJobs: append(append(payments.PeriodicJobs(), game.PeriodicJobs()...), draws.PeriodicJobs()...),
 		Queues: map[string]river.QueueConfig{river.QueueDefault: {MaxWorkers: 10}},
 	})
 	if err != nil {

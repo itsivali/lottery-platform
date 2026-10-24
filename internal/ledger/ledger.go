@@ -235,6 +235,19 @@ func DepositReversal(paymentID, user string, gross, exciseDeducted, walletBalanc
 		c(MpesaClearing, gross, ""))
 }
 
+// PrizePoolFunding moves a draw's pool (a share of its period's stakes) from stakes revenue to the draw type's prize
+// pool, once per draw, when the result is approved. Prizes are paid out of the pool (PrizePayout).
+func PrizePoolFunding(drawID, drawType string, amount int64) (Posting, error) {
+	pool, ok := prizePools[drawType]
+	if !ok {
+		return Posting{}, fmt.Errorf("ledger: unknown draw type %q", drawType)
+	}
+	if err := positive(amount); err != nil {
+		return Posting{}, err
+	}
+	return build("prize_pool_funding", "draw", drawID, "", nil, d(StakesRevenue, amount, ""), c(pool, amount, ""))
+}
+
 // PrizePayout pays a draw prize out of the prize pool via B2C; it does not pass through the wallet.
 func PrizePayout(payoutID, drawType string, gross int64, tax TaxRule) (Posting, error) {
 	pool, ok := prizePools[drawType]

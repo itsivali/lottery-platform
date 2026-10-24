@@ -6,6 +6,8 @@ import (
 	"context"
 	"fmt"
 	"testing"
+
+	"github.com/itsivali/lottery-platform/internal/ledger"
 )
 
 func (e *env) mustExec(t *testing.T, sql string, args ...any) {
@@ -74,5 +76,39 @@ func TestReconcile_CatchesEveryKindOfTampering(t *testing.T) {
 	}
 	if r.OK || r.Mismatches["spin_not_reproducible"][0] != res.Play.TicketID {
 		t.Fatalf("report %+v", r)
+	}
+}
+
+func TestReconcile_PrizePoolFundingKeepsTheBooksBalanced(t *testing.T) {
+	e := setup(t)
+	ctx := context.Background()
+	u := e.player(t, 1000)
+	for i := range 2 {
+		if _, err := e.svc.Play(ctx, u, fmt.Sprint("k", i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// an approved draw moves its pool from stakes revenue to the prize pool (phase 4)
+	var drawID string
+	if err := e.pool.QueryRow(ctx, `SELECT platform.uuid_v7()::text`).Scan(&drawID); err != nil {
+		t.Fatal(err)
+	}
+	p, err := ledger.PrizePoolFunding(drawID, "daily", 60)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tx, err := e.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.ls.Post(ctx, tx, p.Journal); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	r, err := e.svc.Reconcile(ctx)
+	if err != nil || !r.OK || r.Totals["stakes_revenue_kes"] != 140 || r.Totals["prize_pools_funded_kes"] != 60 {
+		t.Fatalf("report %+v %v", r, err)
 	}
 }

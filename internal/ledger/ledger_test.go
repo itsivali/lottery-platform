@@ -293,6 +293,32 @@ func TestPrizePayout_DoesNotTouchTheWallet(t *testing.T) {
 	}
 }
 
+func TestPrizePoolFunding_MovesStakesIntoTheDrawTypesPool(t *testing.T) {
+	p, err := ledger.PrizePoolFunding(ref, "daily", 3_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Journal.Validate(); err != nil || len(p.WalletTxs) != 0 || p.Journal.Kind != "prize_pool_funding" || p.Journal.RefType != "draw" {
+		t.Fatalf("posting %+v %v", p, err)
+	}
+	got := map[string]ledger.Direction{}
+	for _, e := range p.Journal.Entries {
+		if e.AmountKES != 3_000 {
+			t.Fatalf("entry %+v", e)
+		}
+		got[e.Account] = e.Dir
+	}
+	if got[ledger.StakesRevenue] != ledger.Debit || got["PRIZE_POOL_DAILY"] != ledger.Credit {
+		t.Fatalf("entries %+v", p.Journal.Entries)
+	}
+	if _, err := ledger.PrizePoolFunding(ref, "yearly", 1); err == nil {
+		t.Fatal("unknown draw type accepted")
+	}
+	if _, err := ledger.PrizePoolFunding(ref, "daily", 0); err == nil {
+		t.Fatal("empty pool accepted")
+	}
+}
+
 func TestPostingRules_RejectNonPositiveAmounts(t *testing.T) {
 	none := rate(t, "0", ledger.HalfUp)
 	for _, amt := range []int64{0, -5} {

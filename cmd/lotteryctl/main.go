@@ -12,11 +12,14 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"time"
 
 	"github.com/itsivali/lottery-platform/internal/app"
 	"github.com/itsivali/lottery-platform/internal/audit"
+	"github.com/itsivali/lottery-platform/internal/draws"
+	"github.com/itsivali/lottery-platform/internal/draws/drand"
 	"github.com/itsivali/lottery-platform/internal/game"
 	"github.com/itsivali/lottery-platform/internal/identity"
 	"github.com/itsivali/lottery-platform/internal/kyc"
@@ -44,12 +47,17 @@ const usage = `usage:
   lotteryctl kyc pending -operator NAME
   lotteryctl kyc approve|reject -user ID -reason TEXT -operator NAME
   lotteryctl game reconcile
-  lotteryctl game simulate [-days N] [-slots N] [-lucky N] [-price KES]   (no database needed)`
+  lotteryctl game simulate [-days N] [-slots N] [-lucky N] [-price KES]   (no database needed)
+  lotteryctl draws list
+  lotteryctl draws show -draw ID
+  lotteryctl draws sign|approve -draw ID -operator NAME
+  lotteryctl draws void -draw ID -reason TEXT -operator NAME`
 
 type command struct {
 	name                               string
 	receipt, reason, operator, payment string
 	user, refundRef, msisdn, account   string
+	draw                               string
 	amount                             int64
 	days, slots, lucky                 int
 	price                              int64
@@ -69,6 +77,11 @@ var flagsOf = map[string][]string{
 	"kyc reject":               {"user", "reason", "operator"},
 	"game reconcile":           nil,
 	"game simulate":            nil,
+	"draws list":               nil,
+	"draws show":               {"draw"},
+	"draws sign":               {"draw", "operator"},
+	"draws approve":            {"draw", "operator"},
+	"draws void":               {"draw", "reason", "operator"},
 }
 
 // optionalOf lists, per command, the flags it may take; the rest of a command's flags are as in flagsOf.
@@ -96,6 +109,7 @@ func parse(args []string) (command, error) {
 	fs.StringVar(&c.refundRef, "refund-ref", "", "M-Pesa reference of the refund")
 	fs.StringVar(&c.msisdn, "msisdn", "", "payer number (sandbox)")
 	fs.StringVar(&c.account, "account", "", "account number typed by the payer")
+	fs.StringVar(&c.draw, "draw", "", "draw id")
 	fs.Int64Var(&c.amount, "amount", 0, "amount, whole KES")
 	fs.IntVar(&c.days, "days", 0, "simulated player-days per number of plays")
 	fs.IntVar(&c.slots, "slots", 0, "slot count")
@@ -158,6 +172,8 @@ func run(ctx context.Context, cmd command, out io.Writer) error {
 		return kycReview(ctx, cfg, cmd, out)
 	case "game reconcile":
 		return gameReconcile(ctx, cfg, out)
+	case "draws list", "draws show", "draws sign", "draws approve", "draws void":
+		return drawsCmd(ctx, cfg, cmd, out)
 	}
 
 	pool, err := db.Open(ctx, cfg.DatabaseURL)
@@ -326,4 +342,44 @@ func simulate(cmd command, out io.Writer) error {
 	enc := json.NewEncoder(out)
 	enc.SetIndent("", "  ")
 	return enc.Encode(rep)
+}
+
+// drawsCmd shows draws and records officials' sign-offs (two different officials sign the frozen entry list before the
+// drand round and approve the result). Voiding re-runs the draw with a new company seed, which is encrypted with the
+// api's DATA_KEY, so it needs the api's configuration; the other commands need only the database.
+func drawsCmd(ctx context.Context, cfg config.Config, cmd command, out io.Writer) error {
+	pool, err := db.Open(ctx, cfg.DatabaseURL)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+	var kr *crypto.Keyring
+	if cmd.name == "draws void" {
+		if !cfg.API.Enabled {
+			return errors.New("voiding re-runs the draw with a new encrypted seed: set the api's configuration (DATA_KEY and the other api secrets)")
+		}
+		if kr, err = crypto.NewKeyring(cfg.API.DataKeyActive, cfg.API.DataKeys); err != nil {
+			return err
+		}
+	}
+	svc := draws.NewService(pool, clock.Postgres{}, kr, drand.New(drand.Quicknet, drand.DefaultRelays, &http.Client{Timeout: 20 * time.Second}), ledger.NewStore())
+	var res any
+	switch cmd.name {
+	case "draws list":
+		res, err = svc.List(ctx, 40)
+	case "draws show":
+		res, err = svc.Get(ctx, cmd.draw)
+	case "draws sign":
+		res, err = svc.Sign(ctx, cmd.draw, cmd.operator)
+	case "draws approve":
+		res, err = svc.Approve(ctx, cmd.draw, cmd.operator)
+	case "draws void":
+		res, err = svc.Void(ctx, cmd.draw, cmd.operator, cmd.reason)
+	}
+	if err != nil {
+		return err
+	}
+	enc := json.NewEncoder(out)
+	enc.SetIndent("", "  ")
+	return enc.Encode(res)
 }
