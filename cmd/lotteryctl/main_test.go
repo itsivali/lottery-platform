@@ -41,6 +41,12 @@ func TestParse(t *testing.T) {
 			command{name: "payments c2b-simulate", amount: 50, msisdn: "254708374149", account: "0712345678"}, false},
 		{[]string{"payments", "c2b-simulate", "-amount", "-5", "-msisdn", "254708374149", "-account", "x"}, command{}, true},
 		{[]string{"payments", "reconcile", "-operator", "w"}, command{}, true},
+		{[]string{"kyc", "pending", "-operator", "willis"}, command{name: "kyc pending", operator: "operator:willis"}, false},
+		{[]string{"kyc", "pending"}, command{}, true},
+		{[]string{"kyc", "approve", "-user", "u-1", "-reason", "ID checked", "-operator", "willis"},
+			command{name: "kyc approve", user: "u-1", reason: "ID checked", operator: "operator:willis"}, false},
+		{[]string{"kyc", "reject", "-user", "u-1", "-operator", "willis"}, command{}, true}, // no reason
+		{[]string{"kyc", "promote", "-user", "u-1"}, command{}, true},
 		{[]string{"bogus"}, command{}, true},
 		{nil, command{}, true},
 	}

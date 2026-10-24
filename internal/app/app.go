@@ -77,7 +77,8 @@ func New(ctx context.Context, cfg config.Config, pool *pgxpool.Pool) (*App, erro
 	clk := clock.Postgres{}
 
 	// Anything not configured fails closed instead of pretending to work.
-	var provider kyc.Provider = kyc.UnavailableProvider{}
+	// No registry by default: identities are reviewed by staff (ADR 0009). A registry gateway can still be plugged in.
+	var provider kyc.Provider = kyc.ManualProvider{}
 	if c.KYCURL != "" {
 		provider = kyc.NewHTTPProvider(c.KYCURL, c.KYCKey, hc)
 	}

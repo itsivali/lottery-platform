@@ -75,3 +75,15 @@ func (UnavailableProvider) Name() string { return "unavailable" }
 func (UnavailableProvider) Verify(context.Context, Request) (Result, error) {
 	return Result{}, ErrProviderUnavailable
 }
+
+// ManualProvider means there is no registry: every submission waits for a staff decision (owner decision 2026-10-24,
+// ADR 0009: identities are checked by hand instead of a paid registry). Submit recognises it and never runs a job.
+type ManualProvider struct{}
+
+// Name implements Provider.
+func (ManualProvider) Name() string { return "manual" }
+
+// Verify implements Provider; it is never called for manual submissions.
+func (ManualProvider) Verify(context.Context, Request) (Result, error) {
+	return Result{}, ErrProviderUnavailable
+}

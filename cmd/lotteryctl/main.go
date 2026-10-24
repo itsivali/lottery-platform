@@ -1,6 +1,6 @@
 // Command lotteryctl is the admin CLI: migrations and the payments operator actions (reverse a top-up M-Pesa took
 // back, resolve an unconfirmed top-up from the statement, credit or refund a paybill payment held in suspense, check an
-// unverified paybill payment again, run the internal reconciliation). It needs DATABASE_URL; operator actions are
+// unverified paybill payment again, run the internal reconciliation) and manual KYC review. It needs DATABASE_URL; operator actions are
 // audited as staff "operator:<name>". Registering the paybill URLs and simulating a sandbox payment need the api's
 // Daraja configuration.
 package main
@@ -18,11 +18,13 @@ import (
 	"github.com/itsivali/lottery-platform/internal/app"
 	"github.com/itsivali/lottery-platform/internal/audit"
 	"github.com/itsivali/lottery-platform/internal/identity"
+	"github.com/itsivali/lottery-platform/internal/kyc"
 	"github.com/itsivali/lottery-platform/internal/ledger"
 	"github.com/itsivali/lottery-platform/internal/payments"
 	"github.com/itsivali/lottery-platform/internal/payments/daraja"
 	"github.com/itsivali/lottery-platform/internal/platform/clock"
 	"github.com/itsivali/lottery-platform/internal/platform/config"
+	"github.com/itsivali/lottery-platform/internal/platform/crypto"
 	"github.com/itsivali/lottery-platform/internal/platform/db"
 	"github.com/itsivali/lottery-platform/internal/rg"
 	"github.com/itsivali/lottery-platform/internal/wallet"
@@ -37,7 +39,9 @@ const usage = `usage:
   lotteryctl payments suspense-refund -receipt R -refund-ref REF -operator NAME
   lotteryctl payments c2b-recheck -receipt R -operator NAME
   lotteryctl payments c2b-register
-  lotteryctl payments c2b-simulate -amount KES -msisdn 2547XXXXXXXX -account ACCOUNT`
+  lotteryctl payments c2b-simulate -amount KES -msisdn 2547XXXXXXXX -account ACCOUNT
+  lotteryctl kyc pending -operator NAME
+  lotteryctl kyc approve|reject -user ID -reason TEXT -operator NAME`
 
 type command struct {
 	name                               string
@@ -55,6 +59,9 @@ var flagsOf = map[string][]string{
 	"payments suspense-refund": {"receipt", "refund-ref", "operator"},
 	"payments c2b-recheck":     {"receipt", "operator"},
 	"payments c2b-simulate":    {"amount", "msisdn", "account"},
+	"kyc pending":              {"operator"},
+	"kyc approve":              {"user", "reason", "operator"},
+	"kyc reject":               {"user", "reason", "operator"},
 }
 
 func parse(args []string) (command, error) {
@@ -125,6 +132,8 @@ func run(ctx context.Context, cmd command, out io.Writer) error {
 	switch cmd.name {
 	case "payments c2b-register", "payments c2b-simulate":
 		return paybill(ctx, cfg, cmd, out)
+	case "kyc pending", "kyc approve", "kyc reject":
+		return kycReview(ctx, cfg, cmd, out)
 	}
 
 	pool, err := db.Open(ctx, cfg.DatabaseURL)
@@ -211,5 +220,40 @@ func paybill(ctx context.Context, cfg config.Config, cmd command, out io.Writer)
 		return err
 	}
 	_, err = fmt.Fprintln(out, "registered the paybill URLs for shortcode", cfg.Payments.C2BShortCode)
+	return err
+}
+
+// kycReview lists submissions waiting for a staff decision or records one (ADR 0009: identities are checked by hand).
+// Listing decrypts personal data, so it needs the api's DATA_KEY (and the rest of its configuration) and is audited.
+func kycReview(ctx context.Context, cfg config.Config, cmd command, out io.Writer) error {
+	pool, err := db.Open(ctx, cfg.DatabaseURL)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+	var kr *crypto.Keyring
+	if cmd.name == "kyc pending" {
+		if !cfg.API.Enabled {
+			return errors.New("listing submissions decrypts them: set the api's configuration (DATA_KEY and the other api secrets)")
+		}
+		if kr, err = crypto.NewKeyring(cfg.API.DataKeyActive, cfg.API.DataKeys); err != nil {
+			return err
+		}
+	}
+	svc := kyc.NewService(pool, clock.Postgres{}, kyc.ManualProvider{}, kr, cfg.API.IdentityKey, audit.NewWriter(), nil)
+	if cmd.name == "kyc pending" {
+		list, err := svc.AwaitingReview(ctx, cmd.operator)
+		if err != nil {
+			return err
+		}
+		enc := json.NewEncoder(out)
+		enc.SetIndent("", "  ")
+		return enc.Encode(list)
+	}
+	st, err := svc.Review(ctx, cmd.user, cmd.operator, cmd.name == "kyc approve", cmd.reason)
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintln(out, "user", cmd.user, "is now", st)
 	return err
 }

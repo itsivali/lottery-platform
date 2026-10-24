@@ -472,3 +472,79 @@ func TestStatus_ReportsNoneUntilSubmitted(t *testing.T) {
 		t.Fatalf("status = %q, %v", st, err)
 	}
 }
+
+func manualSetup(t *testing.T) *env {
+	t.Helper()
+	e := setup(t)
+	e.svc = kyc.NewService(e.pool, e.clk, kyc.ManualProvider{}, e.kr, []byte("0123456789abcdef0123456789abcdef"), audit.NewWriter(), e.enq)
+	return e
+}
+
+func TestManual_ASubmissionWaitsForAStaffDecisionWithoutAJob(t *testing.T) {
+	e := manualSetup(t)
+	ctx := context.Background()
+	u := e.user(t)
+	st, err := e.svc.Submit(ctx, u, jane)
+	if err != nil || st != kyc.ManualReview {
+		t.Fatalf("submit = %q, %v; want manual_review", st, err)
+	}
+	if s, hash := e.userStatus(t, u); s != "manual_review" || hash {
+		t.Fatalf("account = %q hash=%v: the ID is claimed only on approval", s, hash)
+	}
+	if e.enq.n != 0 {
+		t.Fatalf("%d jobs enqueued: there is no registry to ask", e.enq.n)
+	}
+	var provider, status string
+	if err := e.pool.QueryRow(ctx, `SELECT provider, status FROM kyc.kyc_checks WHERE user_id = $1`, u).Scan(&provider, &status); err != nil ||
+		provider != "manual" || status != "manual_review" {
+		t.Fatalf("check = %s %s %v", provider, status, err)
+	}
+	if _, err := e.svc.Submit(ctx, u, jane); !errors.Is(err, kyc.ErrInReview) {
+		t.Fatalf("second submission: %v", err)
+	}
+	// the up-front checks still apply
+	if _, err := e.svc.Submit(ctx, e.user(t), kyc.Submission{IDNumber: "87654321", FullName: "Young Person", DateOfBirth: "2015-01-01"}); !errors.Is(err, kyc.ErrUnderage) {
+		t.Fatalf("underage: %v", err)
+	}
+}
+
+func TestManual_StaffSeeTheDetailsAuditedAndDecide(t *testing.T) {
+	e := manualSetup(t)
+	ctx := context.Background()
+	a, b := e.user(t), e.user(t)
+	if _, err := e.svc.Submit(ctx, a, jane); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.svc.Submit(ctx, b, kyc.Submission{IDNumber: "12345678", FullName: "Someone Else", DateOfBirth: "1990-05-17"}); err != nil {
+		t.Fatal(err)
+	}
+	list, err := e.svc.AwaitingReview(ctx, "operator:alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 2 || list[0].UserID != a || list[0].IDNumber != "12345678" || list[0].FullName != "Jane Wanjiru Kamau" ||
+		list[0].DateOfBirth != "1990-05-17" || list[0].MSISDN == "" {
+		t.Fatalf("awaiting review = %+v", list)
+	}
+	var unmasked int
+	_ = e.pool.QueryRow(ctx, `SELECT count(*) FROM audit.audit_log WHERE action = 'kyc.unmask' AND actor_id = 'operator:alice'`).Scan(&unmasked)
+	if unmasked != 2 {
+		t.Fatalf("unmask audits = %d, want 2 (one per submission shown)", unmasked)
+	}
+	if _, err := e.svc.AwaitingReview(ctx, ""); err == nil {
+		t.Fatal("an anonymous viewer was shown personal data")
+	}
+	if st, err := e.svc.Review(ctx, a, "operator:alice", true, "ID document checked by phone"); err != nil || st != kyc.Verified {
+		t.Fatalf("approve: %q %v", st, err)
+	}
+	// the same national ID cannot be approved for a second account
+	if _, err := e.svc.Review(ctx, b, "operator:alice", true, "looks fine"); !errors.Is(err, kyc.ErrIDAlreadyRegistered) {
+		t.Fatalf("second approval of one ID: %v", err)
+	}
+	if st, err := e.svc.Review(ctx, b, "operator:alice", false, "ID belongs to another account"); err != nil || st != kyc.Rejected {
+		t.Fatalf("reject: %q %v", st, err)
+	}
+	if list, err := e.svc.AwaitingReview(ctx, "operator:alice"); err != nil || len(list) != 0 {
+		t.Fatalf("after decisions: %+v %v", list, err)
+	}
+}

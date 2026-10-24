@@ -12,6 +12,52 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const awaitingReview = `-- name: AwaitingReview :many
+SELECT u.id AS user_id, u.msisdn, c.id_number_enc, c.full_name_enc, c.date_of_birth_enc, c.created_at
+FROM identity.users u
+JOIN LATERAL (SELECT k.id_number_enc, k.full_name_enc, k.date_of_birth_enc, k.created_at FROM kyc.kyc_checks k
+              WHERE k.user_id = u.id ORDER BY k.created_at DESC, k.id DESC LIMIT 1) c ON true
+WHERE u.kyc_status = 'manual_review'
+ORDER BY c.created_at, u.id
+`
+
+type AwaitingReviewRow struct {
+	UserID         string
+	Msisdn         string
+	IDNumberEnc    []byte
+	FullNameEnc    []byte
+	DateOfBirthEnc []byte
+	CreatedAt      time.Time
+}
+
+// Accounts waiting for a staff decision, with their latest submission, oldest first.
+func (q *Queries) AwaitingReview(ctx context.Context) ([]AwaitingReviewRow, error) {
+	rows, err := q.db.Query(ctx, awaitingReview)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []AwaitingReviewRow
+	for rows.Next() {
+		var i AwaitingReviewRow
+		if err := rows.Scan(
+			&i.UserID,
+			&i.Msisdn,
+			&i.IDNumberEnc,
+			&i.FullNameEnc,
+			&i.DateOfBirthEnc,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const getKYCCheck = `-- name: GetKYCCheck :one
 SELECT id, user_id, status, id_number_enc, id_number_hash, full_name_enc, date_of_birth_enc, provider, supersedes_id
 FROM kyc.kyc_checks WHERE id = $1

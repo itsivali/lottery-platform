@@ -210,8 +210,9 @@ paths:
       responses:
         "202":
           description: |
-            Accepted; verification runs in the background and the status is `pending`. Poll `GET /v1/kyc` for
-            `verified`, `manual_review` or `rejected`. A registry outage only delays the result.
+            Accepted. Without a registry (the default, ADR 0009) the status is `manual_review` until staff decide;
+            with one it is `pending` while verification runs in the background. Poll `GET /v1/kyc` for `verified`,
+            `manual_review` or `rejected`.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/KycStatus" }
