@@ -4,13 +4,15 @@ Read this first at the start of every session.
 
 - **Phase:** 1 — Foundations: complete. **Phase 2 — Payments: in progress** (`docs/checkpoints/phase-2.md`). Slices 1
   (Daraja client + mock), 2 (STK top-up, ADR 0006) and 4 (reversals, player debt, internal reconciliation, ADR 0007)
-  are merged and live. **Slice 3 (C2B paybill, ADR 0008) is built and tested against the mock (2026-10-24);** its live
-  sandbox run waits for the initiator credentials (below). Then slice 5 (realtime).
+  are merged and live. **Slice 3 (C2B paybill, ADR 0008) is merged and live (2026-10-24, #18, #19)**; its sandbox
+  end-to-end run is blocked on Daraja: the sandbox accepts registrations, simulations and status requests but has not
+  called back yet (below). Next: slice 5 (realtime).
 - **Repo state:** the GitHub repository was **deleted and recreated on 2026-10-22** (to drop co-author attribution that
   GitHub kept in old PR refs and caches) and `main` was pushed from the local clone. PR numbers below #8 in these docs
   refer to the deleted repository. Commits and PRs carry only the owner's name.
-- **Deployed (verified 2026-10-22):** Blueprint `lottery-platfform`; `lottery-api` (`https://lottery-api-7jmj.onrender.com`,
-  free, Oregon) builds from `main`; migrations at version 15; sandbox top-ups on (`payments=true`); client address from
+- **Deployed (verified 2026-10-24):** Blueprint `lottery-platfform`; `lottery-api` (`https://lottery-api-7jmj.onrender.com`,
+  free, Oregon) builds from `main` (repository reconnected by the owner on 2026-10-24); migrations at version 17;
+  sandbox top-ups and paybill on (`payments=true paybill=true`, shortcode 600992); client address from
   `CF-Connecting-IP`. Free Postgres `lottery-db` (PG 18) and Key Value `lottery-cache`.
 - **Keys:** `DATA_KEY` and `IDENTITY_KEY` were handed to the owner for the password manager; save `AUTH_KEY` too.
 
@@ -61,12 +63,12 @@ Read this first at the start of every session.
 
 ## Owner items open at the end of the session
 
-- **Render auto-deploy and Blueprint sync broke when the repository was recreated**: merges no longer deploy. Reconnect
-  `itsivali/lottery-platform` on the `lottery-api` service and re-sync the Blueprint in the dashboard. Until then
-  deploys are triggered by hand (Render API, deploy of the `main` commit).
+- **Paybill sandbox run:** URLs registered for 600992 (v1 and v2), payments simulated to the test account, and a
+  Transaction Status request accepted with the owner's initiator credential, but Daraja has not called the hooks
+  (they answer correctly from outside). Retry; if it persists, raise it with Safaricom.
 - PR "release 1.0.0" (release-please) is **held** by the owner's decision; do not merge.
-- Dependabot PRs: being merged one at a time; a GitHub Actions incident on 2026-10-22 left some CI runs stuck — rerun
-  and merge the rest (the `actions/checkout` 7 bump showed one unexplained failure during the incident; recheck).
+- The nightly job failed every night until #20 (2026-10-24): the property step tested the empty root package. It now
+  passes (mutation: wallet 100%, ledger 97.7%, payments 89.7%).
 - Trusted-proxy probe 2 from a second network; rotate the Render API key and the Daraja consumer secret.
 
 ## Next steps
