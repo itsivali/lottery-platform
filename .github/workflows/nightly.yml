@@ -39,7 +39,7 @@ jobs:
           # shellcheck disable=SC2086
           go test -tags integration -race -count=1 -timeout 60m -run 'Property|Rapid' $pkgs -rapid.checks=2000
       - name: 10-million-spin distribution test
-        run: go test -tags integration -count=1 -run 'Distribution10M' ./...
+        run: go test -tags integration,distribution -count=1 -timeout 30m -run 'Distribution10M' ./...
       - name: RTP simulation report
         run: echo "lotteryctl simulate arrives in Phase 3"
       - name: Dependency audit

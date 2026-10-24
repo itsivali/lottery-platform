@@ -5,7 +5,9 @@ Read this first at the start of every session.
 - **Owner decisions 2026-10-24 (ADR 0011):** paybill **C2B** (menu payments) is shelved until a paybill exists. Top-ups
   are **STK prompts into the paybill** (174379 in the sandbox). Buy Goods (`DARAJA_TILL_NUMBER`) is built but off: the
   sandbox refuses it (`Invalid TransactionType`), so it waits for a real till.
-- **Phase:** 1 — Foundations: complete. **Phase 2 — Payments: in progress** (`docs/checkpoints/phase-2.md`). Slices 1
+- **Phase:** 1 — Foundations: complete. **Phase 2 — Payments: complete (2026-10-24).** **Phase 3 — Game and tickets: in
+  progress** (`docs/checkpoints/phase-3.md`; KES 100 per play, lucky spin doubles the day's chances, Nairobi day).
+  Phase 2 detail (`docs/checkpoints/phase-2.md`). Slices 1
   (Daraja client + mock), 2 (STK top-up, ADR 0006) and 4 (reversals, player debt, internal reconciliation, ADR 0007)
   are merged and live. **Slice 3 (C2B paybill, ADR 0008) is merged and live (2026-10-24, #18, #19)**; its sandbox
   end-to-end run is blocked on Daraja: the sandbox accepts registrations, simulations and status requests but has not

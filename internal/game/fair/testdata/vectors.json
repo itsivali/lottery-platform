@@ -1,0 +1,75 @@
+[
+ {
+  "server_seed": "eb5aadbbd988e60a22f3a5b497835dedc1467c43598709343bcb059e619f90c9",
+  "commitment": "722599c997f51eadf7001e1a8ca0fb8b9a5f3b3cc9dad7830ffbe6a634586481",
+  "client_seed": "player-seed",
+  "nonce": 0,
+  "slots": 12,
+  "slot": 5
+ },
+ {
+  "server_seed": "07a70d15daff38e691f5a06828ebee8ad4367b56a769283cfc2a519b95a76924",
+  "commitment": "235d11005e99cad325972e1b0ced3efde33bc0e719a70db84448979e53097171",
+  "client_seed": "player-seed",
+  "nonce": 1,
+  "slots": 12,
+  "slot": 4
+ },
+ {
+  "server_seed": "7a411af18acedf717e9a49c85bd065687731024b292d3b288227aa3a8eed7c9e",
+  "commitment": "32a6a3d6b37a98c5bf1fd5c85f14b7f4753fd383fa9f4ec59623a9c436d5893e",
+  "client_seed": "player-seed",
+  "nonce": 2,
+  "slots": 12,
+  "slot": 0
+ },
+ {
+  "server_seed": "149bf38eb3fbde09d62f6e9fd7bd03e35e001b7128ad8555336738d56883bbda",
+  "commitment": "21de1b24cafa4995f53fcb84587aaac68e2ed6ff3f4123fcca58acd51af5c773",
+  "client_seed": "a",
+  "nonce": 0,
+  "slots": 2,
+  "slot": 0
+ },
+ {
+  "server_seed": "229e225a22feba2b63188a4e52e0057b3afde8cbfeb7a47b98071ecaeaab75ac",
+  "commitment": "94bb96a3e18b127252da5d86151e98380c7fa854a8290bf1d5a97e148775b503",
+  "client_seed": "Z_9-x",
+  "nonce": 41,
+  "slots": 12,
+  "slot": 0
+ },
+ {
+  "server_seed": "f7f37b8bd8101a9b5f6bd5f5b7d024a7282b7809483a87ccdc4554c3b17f3717",
+  "commitment": "8cc07d760896637c26b46d1e4b9a6a4a1ccb962f4213806b75dd8f3492a0e2c4",
+  "client_seed": "0123456789abcdef",
+  "nonce": 999999,
+  "slots": 37,
+  "slot": 24
+ },
+ {
+  "server_seed": "f2fad94c3261a086594df31db6db5b934997d7af92f8e77c8fdfa8d56ac048db",
+  "commitment": "3a06efe63e8f92e39fbf1bbab13330f1daa9d108e0d60717e528500c239b3891",
+  "client_seed": "lucky",
+  "nonce": 7,
+  "slots": 65536,
+  "slot": 26842
+ },
+ {
+  "server_seed": "49bc5cc6df346a8379f99b4b5869ac3e3119b57b514e90d10d2858f189946726",
+  "commitment": "73476dc1600c3201130882c1522523d391c6ac7304c9c4e2ac4ba6aeca3d243d",
+  "client_seed": "seed",
+  "nonce": 123456789012,
+  "slots": 3,
+  "slot": 1
+ },
+ {
+  "server_seed": "9b0e2a885efbe417b55d0c42112daa990f21d618f89eca3b98acda3a2243c355",
+  "commitment": "fef1d0648170dd1bebd21d68ed76eff29101672f4f85a376b155ce9b82faa98d",
+  "client_seed": "rej",
+  "nonce": 456436,
+  "slots": 40000,
+  "slot": 32712,
+  "note": "first word rejected"
+ }
+]
