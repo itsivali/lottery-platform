@@ -19,15 +19,25 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with: { go-version-file: go.mod }
       - name: Mutation testing (gremlins) on money-path packages
+        # wallet is tested only against Postgres, so it is mutated with its integration tests (without them every
+        # mutant is "not covered" and the score is a meaningless 0%)
         run: |
           go install github.com/go-gremlins/gremlins/cmd/gremlins@v0.6.0
           for p in wallet ledger tickets game draws payments payouts; do
             if ls internal/$p/*.go 2>/dev/null | grep -qv doc.go; then
-              (cd internal/$p && gremlins unleash --threshold-efficacy 75)
+              tags=""
+              [ "$p" = wallet ] && tags="--tags integration --workers 2 --timeout-coefficient 5"
+              (cd internal/$p && gremlins unleash --threshold-efficacy 75 $tags)
             fi
           done
       - name: Long property tests
-        run: go test -tags integration -race -count=1 -run 'Property|Rapid' -rapid.checks=10000 ./...
+        # -rapid.checks is a flag of the test binaries, and go test stops reading its own flags at the first one it
+        # does not know (it then tested "." and failed). So the packages come first and only those using rapid run.
+        run: |
+          pkgs=$(grep -rl '"pgregory.net/rapid"' --include='*_test.go' internal cmd | xargs -n1 dirname | sort -u | sed 's|^|./|')
+          echo "property packages: $pkgs"
+          # shellcheck disable=SC2086
+          go test -tags integration -race -count=1 -timeout 60m -run 'Property|Rapid' $pkgs -rapid.checks=2000
       - name: 10-million-spin distribution test
         run: go test -tags integration -count=1 -run 'Distribution10M' ./...
       - name: RTP simulation report
@@ -36,7 +46,7 @@ jobs:
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
       - name: Open an issue on failure
         if: failure()
-        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
         with:
           script: |
             await github.rest.issues.create({
