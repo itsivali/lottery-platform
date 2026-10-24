@@ -29,10 +29,10 @@ jobs:
       RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
       DB_BACKUP_PASSPHRASE: ${{ secrets.DB_BACKUP_PASSPHRASE }}
       RENDER_OWNER_ID: tea-d08ttr15pdvs739sthpg
-      SERVICE_ID: srv-dbcagpifngtc739isa40
+      SERVICE_ID: srv-dbe9gavb9u1s738ttucg
       DB_NAME: lottery-db
       ROTATE_WITHIN_DAYS: "3"
-      HEALTH_URL: https://lottery-api-7jmj.onrender.com/readyz
+      HEALTH_URL: https://lottery-api-4u9g.onrender.com/readyz
       WORK: ${{ github.workspace }}/.db-rotate
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
