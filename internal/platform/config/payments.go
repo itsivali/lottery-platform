@@ -29,7 +29,7 @@ type Payments struct {
 	PublicURL    string // the API's public origin (PUBLIC_BASE_URL, else Render's RENDER_EXTERNAL_URL)
 
 	// Paybill (C2B) payments, verified with the Transaction Status API. All three are set, or none (C2B off).
-	C2BShortCode       string // the paybill customers pay into (sandbox test shortcode 600982)
+	C2BShortCode       string // the paybill customers pay into (sandbox test shortcode 600992)
 	Initiator          string // the API initiator's user name
 	SecurityCredential string // the initiator's password encrypted with Safaricom's certificate, from the Daraja portal
 }

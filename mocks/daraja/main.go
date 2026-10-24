@@ -18,7 +18,7 @@ func main() {
 	m := darajamock.New(darajamock.Options{
 		ConsumerKey: env("MOCK_CONSUMER_KEY", "local"), ConsumerSecret: env("MOCK_CONSUMER_SECRET", "local"),
 		ShortCode: env("MOCK_SHORTCODE", "174379"), Passkey: env("MOCK_PASSKEY", "local"),
-		C2BShortCode: env("MOCK_C2B_SHORTCODE", "600982"), Initiator: env("MOCK_INITIATOR", "local"),
+		C2BShortCode: env("MOCK_C2B_SHORTCODE", "600992"), Initiator: env("MOCK_INITIATOR", "local"),
 		SecurityCredential: env("MOCK_SECURITY_CREDENTIAL", "local"), ExternalValidation: os.Getenv("MOCK_C2B_VALIDATION") == "true",
 		HTTPClient: &http.Client{Timeout: 10 * time.Second},
 	})
